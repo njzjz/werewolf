@@ -476,7 +476,22 @@ def test_players_receive_global_and_role_specific_skills() -> None:
         for player in movie_game.players
     )
     assert all(
+        "board_movie_mad_land" in {skill.name for skill in player.skills}
+        for player in movie_game.players
+    )
+    mad_land_skill = next(
+        skill
+        for skill in movie_game.players[0].skills
+        if skill.name == "board_movie_mad_land"
+    )
+    assert "所有角色都可以声称狂人" in mad_land_skill.instructions
+    assert "不是免票证明" in mad_land_skill.instructions
+    assert all(
         "global_movie_survival" not in {skill.name for skill in player.skills}
+        for player in game.players
+    )
+    assert all(
+        "board_movie_mad_land" not in {skill.name for skill in player.skills}
         for player in game.players
     )
 
