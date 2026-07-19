@@ -41,6 +41,7 @@ class LLMProviderConfig:
     wire_api: str = "chat"
     reasoning_effort: str | None = None
     force_ipv4: bool = False
+    stream: bool = False
     extra_headers: dict[str, str] = field(default_factory=dict)
 
     def resolved_api_key(self) -> str | None:
@@ -98,7 +99,9 @@ class GameConfig:
     role_preset: str = "classic"
     spectator_progress: bool = False
     strict_controllers: bool = False
+    controller_retries: int = 0
     public_transcript_path: str | None = None
+    checkpoint_path: str | None = None
 
 
 def _provider_from_dict(raw: dict[str, Any]) -> LLMProviderConfig:
@@ -114,6 +117,7 @@ def _provider_from_dict(raw: dict[str, Any]) -> LLMProviderConfig:
         wire_api=str(raw.get("wire_api", "chat")),
         reasoning_effort=raw.get("reasoning_effort"),
         force_ipv4=bool(raw.get("force_ipv4", False)),
+        stream=bool(raw.get("stream", False)),
         extra_headers={str(k): str(v) for k, v in raw.get("extra_headers", {}).items()},
     )
 
@@ -152,9 +156,15 @@ def load_config(path: str | Path) -> GameConfig:
         role_preset=str(raw.get("role_preset", "classic")),
         spectator_progress=bool(raw.get("spectator_progress", False)),
         strict_controllers=bool(raw.get("strict_controllers", False)),
+        controller_retries=int(raw.get("controller_retries", 0)),
         public_transcript_path=(
             str(raw["public_transcript_path"])
             if raw.get("public_transcript_path") is not None
+            else None
+        ),
+        checkpoint_path=(
+            str(raw["checkpoint_path"])
+            if raw.get("checkpoint_path") is not None
             else None
         ),
     )
@@ -228,6 +238,9 @@ def validate_config(config: GameConfig) -> None:
     if config.context_char_limit < 2000:
         msg = "context_char_limit must be at least 2000"
         raise ValueError(msg)
+    if config.controller_retries < 0:
+        msg = "controller_retries cannot be negative"
+        raise ValueError(msg)
 
 
 def example_config() -> dict[str, Any]:
@@ -259,7 +272,9 @@ def example_config() -> dict[str, Any]:
         "role_preset": "classic",
         "spectator_progress": False,
         "strict_controllers": False,
+        "controller_retries": 0,
         "public_transcript_path": None,
+        "checkpoint_path": None,
         "providers": {
             "default": {
                 "base_url": "https://api.openai.com/v1",
@@ -270,6 +285,7 @@ def example_config() -> dict[str, Any]:
                 "max_tokens": 700,
                 "use_json_mode": True,
                 "wire_api": "chat",
+                "stream": False,
             },
         },
         "rules": asdict(RuleConfig()),

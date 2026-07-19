@@ -55,7 +55,9 @@ python -m werewolf play --config werewolf.json
   "role_preset": "classic",
   "spectator_progress": false,
   "strict_controllers": false,
+  "controller_retries": 0,
   "public_transcript_path": null,
+  "checkpoint_path": null,
   "providers": {
     "default": {
       "base_url": "https://api.openai.com/v1",
@@ -65,7 +67,8 @@ python -m werewolf play --config werewolf.json
       "timeout": 120,
       "max_tokens": 700,
       "use_json_mode": true,
-      "wire_api": "chat"
+      "wire_api": "chat",
+      "stream": true
     },
     "local": {
       "base_url": "http://127.0.0.1:8000/v1",
@@ -102,6 +105,8 @@ python -m werewolf play --config werewolf.json
 - `bot`：不访问网络的简单本地机器人，适合演示和调试，不是 LLM。
 
 同一局可以配置多个 provider，从而混用 OpenAI、代理服务或本地 OpenAI-compatible 服务。`wire_api` 支持传统的 `chat`（`/chat/completions`）和 Codex 常用的 `responses`（`/responses`）。推荐通过 `api_key_env` 读取密钥，避免把真实密钥写进配置文件。若兼容服务不支持 JSON mode，将 `use_json_mode` 设为 `false`；模型仍会被提示返回 JSON。若域名同时提供 IPv4/IPv6、但当前环境无法连接 IPv6，可设置 `force_ipv4: true`，客户端仍会保留正常的 TLS 主机名验证。
+
+兼容服务支持 SSE 时建议设置 `stream: true`。客户端会持续接收 Responses 或 Chat 的文本增量并在本地组装完整 JSON，可降低长时间 `xhigh` 推理经过代理时发生 524 的概率。增量中的私密思考、狼聊和技能选择不会直接打印到公开观战日志；只有完整响应通过 JSON 与合法性校验后才进入游戏状态。
 
 玩家技能分为三层，并在开局分配身份后自动合并：
 
@@ -146,10 +151,22 @@ python -m werewolf play --config werewolf.json
 
 ```bash
 werewolf play --config movie.json --spectator --strict-controllers \
-  --transcript game_runs/movie_public.log
+  --controller-retries 2 --transcript game_runs/movie_public.log \
+  --checkpoint game_runs/movie_private.checkpoint.json
 ```
 
 严格模式下，API 失败、无效 JSON 或非法选择会直接终止本局，不会悄悄替换成本地 bot，因此“全部玩家都是 LLM”可以被实际保证。
+
+`controller_retries` 或 `--controller-retries` 可在严格终止前重试同一个 LLM 动作。重试仍调用原 LLM，不会使用本地 bot；观战日志会显示重试次数，但不会暴露执行私密动作的玩家身份。
+
+`checkpoint_path` 或 `--checkpoint` 会在开局、完整夜晚、完整白天以及每一次控制器成功返回后原子保存恢复数据。阶段内的每个响应都会进入动作日志；恢复时先回滚到阶段起点，再自动重放已经完成的响应，只重新请求第一个未完成动作，因此狼人票、公开票和平票聚合不会丢失或重复调用。
+
+```bash
+werewolf play --config movie.json \
+  --resume game_runs/movie_private.checkpoint.json
+```
+
+恢复点包含身份、恋人关系、个人私密记忆、心路历程和已完成的控制器响应，文件权限会设置为仅当前用户可读写。它不能作为公开观战日志分享。恢复必须使用相同语言、电影预设、玩家顺序和控制器配置；公开日志会自动截断到恢复点对应位置，再重放本阶段的已完成公开事件。
 
 `public_transcript_path` 或 `--transcript` 会把法官公告、公开发言、公开投票、合法遗言和安全观战进度实时追加到 UTF-8 文件。文件不包含角色私密信息、查验目标、守护目标、狼聊、恋人聊天或个人心路。另开终端即可实时查看：
 

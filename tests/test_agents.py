@@ -138,3 +138,27 @@ def test_terminal_persists_only_explicit_public_output(tmp_path) -> None:
     assert transcript.read_text(encoding="utf-8") == (
         "\n[法官] 天亮了。\n[观战] 公开行动处理中……\n[玩家01] 这是公开发言。\n"
     )
+
+
+def test_responses_sse_stream_is_assembled_without_exposing_partial_json() -> None:
+    """Responses text deltas should reconstruct one complete controller payload."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(
+            base_url="https://example.invalid/v1",
+            model="streaming-model",
+            wire_api="responses",
+            stream=True,
+        ),
+    )
+
+    content = client._stream_content(  # noqa: SLF001 - SSE parsing is the unit under test.
+        [
+            b"event: response.output_text.delta\n",
+            b'data: {"type":"response.output_text.delta","delta":"{\\"text\\":\\"ni"}\n',
+            b'data: {"type":"response.output_text.delta","delta":"hao\\"}"}\n',
+            b'data: {"type":"response.completed","response":{}}\n',
+            b"data: [DONE]\n",
+        ],
+    )
+
+    assert content == '{"text":"nihao"}'

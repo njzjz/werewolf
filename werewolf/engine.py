@@ -31,9 +31,12 @@ from .models import (
     ActionRequest,
     AgentResponse,
     Faction,
+    MemoryEvent,
     PlayerState,
     PlayerView,
     Role,
+    Thought,
+    Visibility,
     localized,
 )
 from .skills import add_lover_skill, add_movie_survival_skill, resolve_player_skills
@@ -154,6 +157,7 @@ class Game:
         *,
         controllers: dict[str, Controller] | None = None,
         terminal: Terminal | None = None,
+        resume_checkpoint: str | Path | None = None,
     ) -> None:
         validate_config(config)
         self.config = config
@@ -161,7 +165,18 @@ class Game:
         self.terminal = terminal or Terminal(
             clear_screen=config.clear_screen,
             transcript_path=config.public_transcript_path,
+            reset_transcript=resume_checkpoint is None,
         )
+        self._checkpoint_path = (
+            Path(resume_checkpoint or config.checkpoint_path)
+            if resume_checkpoint or config.checkpoint_path
+            else None
+        )
+        self._resume_day: int | None = None
+        self._resume_step: str | None = None
+        self._checkpoint_base_payload: dict[str, object] | None = None
+        self._action_journal: list[dict[str, object]] = []
+        self._action_cursor = 0
         self.day = 0
         self.phase = "setup"
         self._antidote_available = True
@@ -194,6 +209,195 @@ class Game:
             )
         self._by_id = {player.player_id: player for player in self.players}
         self.boundary = InformationBoundary(self.players)
+        if resume_checkpoint is not None:
+            self._load_checkpoint(Path(resume_checkpoint))
+
+    def _config_signature(self) -> dict[str, object]:
+        """Return non-secret configuration fields that must match on resume."""
+        return {
+            "language": self.config.language,
+            "role_preset": self.config.role_preset,
+            "players": [
+                {
+                    "name": seat.name,
+                    "controller": seat.controller,
+                    "provider": seat.provider,
+                }
+                for seat in self.config.players
+            ],
+        }
+
+    def _checkpoint_payload(
+        self,
+        *,
+        next_day: int,
+        next_step: str,
+    ) -> dict[str, object]:
+        """Serialize one safe phase boundary without provider credentials."""
+        rng_state = self.rng.getstate()
+        transcript_path = (
+            str(self.terminal.transcript_path.resolve())
+            if self.terminal.transcript_path is not None
+            else None
+        )
+        return {
+            "version": 1,
+            "config_signature": self._config_signature(),
+            "next_day": next_day,
+            "next_step": next_step,
+            "day": self.day,
+            "phase": self.phase,
+            "antidote_available": self._antidote_available,
+            "poison_available": self._poison_available,
+            "last_exiled_id": self._last_exiled_id,
+            "rng_state": [rng_state[0], list(rng_state[1]), rng_state[2]],
+            "transcript": {
+                "path": transcript_path,
+                "size": self.terminal.transcript_size(),
+            },
+            "players": [
+                {
+                    "player_id": player.player_id,
+                    "name": player.name,
+                    "role": player.role.value,
+                    "alive": player.alive,
+                    "lover_id": player.lover_id,
+                    "events": [
+                        {
+                            **asdict(event),
+                            "visibility": event.visibility.value,
+                        }
+                        for event in player.memory.events
+                    ],
+                    "thoughts": [asdict(thought) for thought in player.memory.thoughts],
+                }
+                for player in self.players
+            ],
+            "action_journal": [],
+        }
+
+    def _save_checkpoint(self, *, next_day: int, next_step: str) -> None:
+        """Start a recoverable phase and clear its completed-action journal."""
+        if self._checkpoint_path is None:
+            return
+        payload = self._checkpoint_payload(next_day=next_day, next_step=next_step)
+        self._checkpoint_base_payload = payload
+        self._action_journal = []
+        self._action_cursor = 0
+        self._write_checkpoint(payload)
+
+    def _write_checkpoint(self, payload: dict[str, object]) -> None:
+        """Atomically persist a private checkpoint with restrictive permissions."""
+        if self._checkpoint_path is None:
+            return
+        self._checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._checkpoint_path.with_name(
+            f".{self._checkpoint_path.name}.tmp",
+        )
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.chmod(0o600)
+        temporary.replace(self._checkpoint_path)
+        self._checkpoint_path.chmod(0o600)
+
+    def _load_checkpoint(self, path: Path) -> None:
+        """Restore a safe phase boundary and its per-action response journal."""
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if raw.get("version") != 1:
+            msg = f"Unsupported checkpoint version in {path}"
+            raise ValueError(msg)
+        if raw.get("config_signature") != self._config_signature():
+            msg = "Checkpoint does not match the supplied game configuration"
+            raise ValueError(msg)
+        player_data = raw.get("players")
+        if not isinstance(player_data, list) or len(player_data) != len(self.players):
+            msg = "Checkpoint player list is malformed"
+            raise ValueError(msg)
+        max_sequence = 0
+        for index, (player, saved) in enumerate(
+            zip(self.players, player_data),
+        ):
+            if not isinstance(saved, dict):
+                msg = "Checkpoint player entry is malformed"
+                raise TypeError(msg)
+            if (
+                saved.get("player_id") != player.player_id
+                or saved.get("name") != player.name
+            ):
+                msg = "Checkpoint player order does not match the configuration"
+                raise ValueError(msg)
+            player.role = Role(str(saved["role"]))
+            player.alive = bool(saved["alive"])
+            player.lover_id = saved.get("lover_id")
+            skills = resolve_player_skills(
+                player.role,
+                list(self.config.players[index].skills),
+            )
+            if self.config.role_preset != "classic":
+                skills = add_movie_survival_skill(skills)
+            if player.lover_id:
+                skills = add_lover_skill(skills)
+            player.skills = skills
+            player.memory.events = [
+                MemoryEvent(
+                    sequence=int(event["sequence"]),
+                    day=int(event["day"]),
+                    phase=str(event["phase"]),
+                    text=str(event["text"]),
+                    visibility=Visibility(str(event["visibility"])),
+                    sender=event.get("sender"),
+                )
+                for event in saved.get("events", [])
+            ]
+            player.memory.thoughts = [
+                Thought(
+                    day=int(thought["day"]),
+                    phase=str(thought["phase"]),
+                    text=str(thought["text"]),
+                )
+                for thought in saved.get("thoughts", [])
+            ]
+            max_sequence = max(
+                [max_sequence, *(event.sequence for event in player.memory.events)],
+            )
+        self.boundary.continue_after(max_sequence)
+        self.day = int(raw["day"])
+        self.phase = str(raw["phase"])
+        self._antidote_available = bool(raw["antidote_available"])
+        self._poison_available = bool(raw["poison_available"])
+        self._last_exiled_id = raw.get("last_exiled_id")
+        rng_state = raw["rng_state"]
+        self.rng.setstate((int(rng_state[0]), tuple(rng_state[1]), rng_state[2]))
+        transcript = raw.get("transcript", {})
+        expected_path = transcript.get("path")
+        actual_path = (
+            str(self.terminal.transcript_path.resolve())
+            if self.terminal.transcript_path is not None
+            else None
+        )
+        if expected_path != actual_path:
+            msg = "Checkpoint transcript path does not match the supplied configuration"
+            raise ValueError(msg)
+        self.terminal.truncate_transcript(transcript.get("size"))
+        self._resume_day = int(raw["next_day"])
+        self._resume_step = str(raw["next_step"])
+        self._action_journal = list(raw.get("action_journal", []))
+        self._action_cursor = 0
+        self._checkpoint_base_payload = raw
+        if self.config.spectator_progress:
+            self.terminal.progress(
+                self._t(
+                    f"已从恢复点加载：第 {self._resume_day} 天，下一阶段 {self._resume_step}。",
+                    f"Checkpoint restored: day {self._resume_day}, next phase {self._resume_step}.",
+                ),
+            )
+
+    def _clear_checkpoint(self) -> None:
+        """Remove a checkpoint after the match reaches a terminal result."""
+        if self._checkpoint_path is not None:
+            self._checkpoint_path.unlink(missing_ok=True)
 
     def _roles(self) -> list[Role]:
         fixed = [player.fixed_role for player in self.config.players]
@@ -237,17 +441,35 @@ class Game:
 
     def run(self) -> GameResult:
         """Run until one faction wins or the configured day cap is reached."""
-        self._setup()
-        for day in range(1, self.config.rules.max_days + 1):
+        if self._resume_step is None:
+            next_day = 0
+            next_step = "setup"
+            self._save_checkpoint(next_day=next_day, next_step=next_step)
+        else:
+            next_day = self._resume_day if self._resume_day is not None else 1
+            next_step = self._resume_step
+        if next_step == "setup":
+            self.day = 0
+            self._setup()
+            next_day = 1
+            next_step = "night"
+            self._save_checkpoint(next_day=next_day, next_step=next_step)
+        for day in range(next_day, self.config.rules.max_days + 1):
             self.day = day
-            self._night()
-            winner = self._winner()
-            if winner is not None:
-                return self._finish(winner, "night_resolution")
-            self._daytime()
-            winner = self._winner()
-            if winner is not None:
-                return self._finish(winner, "day_vote")
+            if next_step == "night":
+                self._night()
+                winner = self._winner()
+                if winner is not None:
+                    return self._finish(winner, "night_resolution")
+                next_step = "daytime"
+                self._save_checkpoint(next_day=day, next_step=next_step)
+            if next_step == "daytime":
+                self._daytime()
+                winner = self._winner()
+                if winner is not None:
+                    return self._finish(winner, "day_vote")
+                next_step = "night"
+                self._save_checkpoint(next_day=day + 1, next_step=next_step)
         return self._finish(None, "max_days")
 
     def _setup(self) -> None:
@@ -920,6 +1142,14 @@ class Game:
         return False
 
     def _act(self, player: PlayerState, request: ActionRequest) -> AgentResponse:
+        replayed = self._replay_action(player, request)
+        if replayed is not None:
+            response = replayed
+            private_note = "\n".join(
+                part for part in (response.thought, response.note) if part.strip()
+            )
+            player.memory.reflect(self.day, self.phase, private_note)
+            return response
         heartbeat_stop = threading.Event()
         heartbeat: threading.Thread | None = None
         if self.config.spectator_progress:
@@ -932,36 +1162,128 @@ class Game:
                 )
                 heartbeat.start()
         try:
-            response = player.controller.act(self._view(player), request)
-        except (EOFError, KeyboardInterrupt):
-            raise
-        except Exception as exc:
-            if self.config.strict_controllers:
-                msg = (
-                    f"Controller failed for {player.name} during {request.kind.value}: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-                raise RuntimeError(msg) from exc
-            self.boundary.private(
-                day=self.day,
-                phase=self.phase,
-                recipient=player.player_id,
-                text=self._t(
-                    f"控制器调用失败，法官启用本地后备动作：{type(exc).__name__}: {exc}",
-                    f"Controller failed; judge used a local fallback: {type(exc).__name__}: {exc}",
-                ),
-            )
-            response = BotController(self.rng).act(self._view(player), request)
+            response = self._controller_action(player, request)
+            self._record_action(player, request, response)
         finally:
             heartbeat_stop.set()
             if heartbeat is not None:
                 heartbeat.join(timeout=1)
-        legal = {option.value for option in request.options}
-        if (
-            request.options
-            and response.choice not in legal
-            and (response.choice is not None or not request.allow_abstain)
-        ):
+        private_note = "\n".join(
+            part for part in (response.thought, response.note) if part.strip()
+        )
+        player.memory.reflect(self.day, self.phase, private_note)
+        return response
+
+    def _action_signature(
+        self,
+        player: PlayerState,
+        request: ActionRequest,
+    ) -> dict[str, object]:
+        """Identify one deterministic controller call within a recoverable phase."""
+        return {
+            "day": self.day,
+            "phase": self.phase,
+            "player_id": player.player_id,
+            "kind": request.kind.value,
+            "prompt": request.prompt,
+            "options": [option.value for option in request.options],
+            "allow_abstain": request.allow_abstain,
+        }
+
+    def _replay_action(
+        self,
+        player: PlayerState,
+        request: ActionRequest,
+    ) -> AgentResponse | None:
+        """Replay a completed response from the per-call recovery journal."""
+        if self._action_cursor >= len(self._action_journal):
+            return None
+        entry = self._action_journal[self._action_cursor]
+        signature = self._action_signature(player, request)
+        for key, value in signature.items():
+            if entry.get(key) != value:
+                msg = (
+                    "Checkpoint action journal diverged at index "
+                    f"{self._action_cursor}: expected {signature!r}, got {entry!r}"
+                )
+                raise RuntimeError(msg)
+        response = entry.get("response")
+        if not isinstance(response, dict):
+            msg = "Checkpoint action response is malformed"
+            raise TypeError(msg)
+        self._action_cursor += 1
+        return AgentResponse(
+            choice=response.get("choice"),
+            text=str(response.get("text", "")),
+            thought=str(response.get("thought", "")),
+            note=str(response.get("note", "")),
+        )
+
+    def _record_action(
+        self,
+        player: PlayerState,
+        request: ActionRequest,
+        response: AgentResponse,
+    ) -> None:
+        """Persist one successful controller response before applying its effects."""
+        if self._checkpoint_base_payload is None or self._checkpoint_path is None:
+            return
+        entry = {
+            **self._action_signature(player, request),
+            "response": asdict(response),
+        }
+        self._action_journal.append(entry)
+        self._action_cursor = len(self._action_journal)
+        payload = {
+            **self._checkpoint_base_payload,
+            "action_journal": self._action_journal,
+        }
+        self._checkpoint_base_payload = payload
+        self._write_checkpoint(payload)
+
+    def _controller_action(
+        self,
+        player: PlayerState,
+        request: ActionRequest,
+    ) -> AgentResponse:
+        """Call one controller with bounded retries and validated choices."""
+        for attempt in range(self.config.controller_retries + 1):
+            try:
+                response = player.controller.act(self._view(player), request)
+            except (EOFError, KeyboardInterrupt):
+                raise
+            except Exception as exc:
+                if attempt < self.config.controller_retries:
+                    self._announce_controller_retry(attempt + 1)
+                    continue
+                if self.config.strict_controllers:
+                    msg = (
+                        f"Controller failed for {player.name} during "
+                        f"{request.kind.value}: {type(exc).__name__}: {exc}"
+                    )
+                    raise RuntimeError(msg) from exc
+                self.boundary.private(
+                    day=self.day,
+                    phase=self.phase,
+                    recipient=player.player_id,
+                    text=self._t(
+                        f"控制器调用失败，法官启用本地后备动作：{type(exc).__name__}: {exc}",
+                        f"Controller failed; judge used a local fallback: {type(exc).__name__}: {exc}",
+                    ),
+                )
+                return BotController(self.rng).act(self._view(player), request)
+
+            legal = {option.value for option in request.options}
+            illegal = bool(
+                request.options
+                and response.choice not in legal
+                and (response.choice is not None or not request.allow_abstain)
+            )
+            if not illegal:
+                return response
+            if attempt < self.config.controller_retries:
+                self._announce_controller_retry(attempt + 1)
+                continue
             if self.config.strict_controllers:
                 msg = (
                     f"Controller returned an illegal choice for {player.name} "
@@ -978,17 +1300,25 @@ class Game:
                 ),
             )
             fallback = BotController(self.rng).act(self._view(player), request)
-            response = AgentResponse(
+            return AgentResponse(
                 choice=fallback.choice,
                 text=response.text,
                 thought=response.thought,
                 note=response.note,
             )
-        private_note = "\n".join(
-            part for part in (response.thought, response.note) if part.strip()
+        msg = "Controller retry loop ended without a response"
+        raise RuntimeError(msg)
+
+    def _announce_controller_retry(self, retry_number: int) -> None:
+        """Expose a technical retry without identifying a private actor."""
+        if not self.config.spectator_progress:
+            return
+        self.terminal.progress(
+            self._t(
+                f"LLM 调用未成功，正在进行第 {retry_number}/{self.config.controller_retries} 次重试……",
+                f"The LLM call failed; retry {retry_number}/{self.config.controller_retries} is starting...",
+            ),
         )
-        player.memory.reflect(self.day, self.phase, private_note)
-        return response
 
     def _spectator_heartbeat(self, stop: threading.Event) -> None:
         """Emit periodic safe liveness signals while one LLM request is pending."""
@@ -1204,6 +1534,7 @@ class Game:
         )
         if self.config.memory_directory:
             self.export_memories(self.config.memory_directory)
+        self._clear_checkpoint()
         return GameResult(
             winner=winner,
             winning_players=winning_players,

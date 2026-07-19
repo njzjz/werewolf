@@ -90,6 +90,21 @@ class FailingController:
         raise RuntimeError(msg)
 
 
+class FlakyController:
+    """Fail once before returning a valid LLM-like response."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def act(self, _view, _request):
+        """Return a response after one transient failure."""
+        self.calls += 1
+        if self.calls == 1:
+            msg = "transient gateway timeout"
+            raise RuntimeError(msg)
+        return AgentResponse(text="重试成功", thought="保留私密判断")
+
+
 @pytest.mark.parametrize(
     ("count", "wolves", "hunters"),
     [(6, 2, 0), (8, 2, 1), (9, 3, 1), (12, 4, 1), (16, 5, 1)],
@@ -279,6 +294,78 @@ def test_strict_controllers_never_fall_back_to_local_bot() -> None:
                 (ActionOption("p2", "玩家2"),),
             ),
         )
+
+
+def test_controller_retries_stay_llm_only() -> None:
+    """Transient failures should retry the same controller without bot fallback."""
+    controller = FlakyController()
+    config = replace(
+        fixed_config(),
+        strict_controllers=True,
+        controller_retries=1,
+    )
+    game = Game(
+        config,
+        controllers={"p1": controller},
+        terminal=SilentTerminal(),
+    )
+
+    response = game._act(  # noqa: SLF001
+        game._by_id["p1"],  # noqa: SLF001
+        ActionRequest(ActionKind.SPEAK, "发言"),
+    )
+
+    assert controller.calls == 2
+    assert response.text == "重试成功"
+    assert game._by_id["p1"].memory.thoughts[-1].text == "保留私密判断"  # noqa: SLF001
+
+
+def test_checkpoint_replays_each_completed_controller_call(tmp_path) -> None:
+    """Resume should replay journaled responses and roll back partial public output."""
+    checkpoint = tmp_path / "private.checkpoint.json"
+    transcript = tmp_path / "public.log"
+    scripted = ScriptedController(
+        {
+            ActionKind.SPEAK: [
+                AgentResponse(text="已完成的发言", thought="已完成的私密判断"),
+            ],
+        },
+    )
+    config = replace(
+        fixed_config(),
+        checkpoint_path=str(checkpoint),
+        public_transcript_path=str(transcript),
+        strict_controllers=True,
+    )
+    game = Game(config, controllers={"p1": scripted})
+    game.day = 1
+    game.phase = "discussion"
+    game.boundary.private(
+        day=1,
+        phase="discussion",
+        recipient="p1",
+        text="阶段起点私密信息",
+    )
+    game.terminal.announce("阶段起点")
+    game._save_checkpoint(next_day=1, next_step="daytime")  # noqa: SLF001
+    request = ActionRequest(ActionKind.SPEAK, "发言")
+    response = game._act(game._by_id["p1"], request)  # noqa: SLF001
+    game._say(game._by_id["p1"], response.text)  # noqa: SLF001
+    assert "已完成的发言" in transcript.read_text(encoding="utf-8")
+
+    resumed = Game(
+        config,
+        controllers={"p1": FailingController()},
+        resume_checkpoint=checkpoint,
+    )
+
+    assert "已完成的发言" not in transcript.read_text(encoding="utf-8")
+    replayed = resumed._act(resumed._by_id["p1"], request)  # noqa: SLF001
+    assert replayed == response
+    assert resumed._by_id["p1"].memory.thoughts[-1].text == (  # noqa: SLF001
+        "已完成的私密判断"
+    )
+    assert checkpoint.stat().st_mode & 0o777 == 0o600
 
 
 def test_players_receive_global_and_role_specific_skills() -> None:

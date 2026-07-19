@@ -23,6 +23,13 @@ class InformationBoundary:
         self._sequence = 0
         self.audit_log: list[tuple[MemoryEvent, frozenset[str]]] = []
 
+    def continue_after(self, sequence: int) -> None:
+        """Continue event numbering after restoring privacy-filtered memories."""
+        if sequence < self._sequence:
+            msg = "Cannot move the information sequence backwards"
+            raise ValueError(msg)
+        self._sequence = sequence
+
     def publish(
         self,
         *,
