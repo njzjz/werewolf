@@ -150,7 +150,7 @@ def fixed_role_config(
         seed=1,
         clear_screen=False,
         memory_directory=None,
-        rules=RuleConfig(max_days=5),
+        rules=RuleConfig(max_days=5, randomize_seating=False),
         role_preset=role_preset,
     )
 
@@ -215,6 +215,59 @@ def test_movie_role_decks_match_the_film_compositions(
     deck = role_deck(sum(expected.values()), preset)
 
     assert Counter(deck) == expected
+
+
+def test_daily_discussion_uses_a_seeded_circular_starting_seat() -> None:
+    """Discussion should rotate around a daily random living seat, not always p1."""
+    game = Game(fixed_config(), terminal=SilentTerminal())
+
+    order = game._discussion_order()  # noqa: SLF001
+
+    assert [player.player_id for player in order] == [
+        "p2",
+        "p3",
+        "p4",
+        "p5",
+        "p6",
+        "p1",
+    ]
+
+
+def test_fresh_game_randomizes_seats_without_detaching_fixed_roles() -> None:
+    """Player order should shuffle while an explicit role remains with its owner."""
+    config = fixed_config()
+    expected_roles = {seat.name: seat.fixed_role for seat in config.players}
+    config = replace(
+        config,
+        rules=replace(config.rules, randomize_seating=True),
+    )
+
+    game = Game(config, terminal=SilentTerminal())
+
+    assert [player.name for player in game.players] == [
+        "玩家3",
+        "玩家4",
+        "玩家6",
+        "玩家1",
+        "玩家5",
+        "玩家2",
+    ]
+    assert {player.name: player.role for player in game.players} == expected_roles
+
+
+def test_discussion_start_randomization_can_be_disabled() -> None:
+    """A house rule should preserve the original fixed seat order when requested."""
+    config = fixed_config()
+    config = replace(
+        config,
+        rules=replace(config.rules, randomize_discussion_start=False),
+    )
+    game = Game(config, terminal=SilentTerminal())
+
+    assert [
+        player.player_id
+        for player in game._discussion_order()  # noqa: SLF001
+    ] == ["p1", "p2", "p3", "p4", "p5", "p6"]
 
 
 def test_setup_keeps_roles_private_and_wolf_roster_team_only() -> None:

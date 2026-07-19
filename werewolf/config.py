@@ -82,6 +82,8 @@ class RuleConfig:
     night_death_last_words: bool = False
     day_vote_last_words: bool = True
     hunter_shot_last_words: bool = False
+    randomize_discussion_start: bool = True
+    randomize_seating: bool = True
 
 
 @dataclass(frozen=True)

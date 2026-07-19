@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from werewolf.agents import LLMController, OpenAICompatibleClient, Terminal
+import werewolf.agents as agents_module
+from werewolf.agents import (
+    HumanController,
+    LLMController,
+    OpenAICompatibleClient,
+    Terminal,
+)
 from werewolf.config import LLMProviderConfig
 from werewolf.models import (
     ActionKind,
@@ -133,11 +139,33 @@ def test_terminal_persists_only_explicit_public_output(tmp_path) -> None:
 
     terminal.announce("天亮了。")
     terminal.progress("公开行动处理中……")
+    terminal.transient_progress("这条临时状态不能进入日志")
+    terminal.clear_transient_progress()
     terminal.say("玩家01", "这是公开发言。")
 
     assert transcript.read_text(encoding="utf-8") == (
         "\n[法官] 天亮了。\n[观战] 公开行动处理中……\n[玩家01] 这是公开发言。\n"
     )
+
+
+def test_human_controller_enables_readline_cursor_bindings(monkeypatch) -> None:
+    """Human input should activate character deletion and left/right movement."""
+
+    class FakeReadline:
+        def __init__(self) -> None:
+            self.bindings: list[str] = []
+
+        def parse_and_bind(self, binding: str) -> None:
+            self.bindings.append(binding)
+
+    fake = FakeReadline()
+    monkeypatch.setattr(agents_module, "_readline", fake)
+
+    HumanController(Terminal(clear_screen=False))
+
+    assert "set editing-mode emacs" in fake.bindings
+    assert '"\\e[D": backward-char' in fake.bindings
+    assert '"\\e[C": forward-char' in fake.bindings
 
 
 def test_responses_sse_stream_is_assembled_without_exposing_partial_json() -> None:

@@ -6,6 +6,7 @@ import json
 import random
 import re
 import threading
+import time
 from collections import Counter
 from contextlib import suppress
 from dataclasses import asdict, dataclass
@@ -44,7 +45,7 @@ from .skills import add_lover_skill, add_movie_survival_skill, resolve_player_sk
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from .config import GameConfig
+    from .config import GameConfig, PlayerConfig
 
 
 class DeathCause(str, Enum):
@@ -183,9 +184,11 @@ class Game:
         self._poison_available = True
         self._last_exiled_id: str | None = None
 
-        roles = self._roles()
+        seats = self._ordered_seats(resume_checkpoint)
+        self._seat_configs = tuple(seats)
+        roles = self._roles(seats)
         self.players: list[PlayerState] = []
-        for index, (seat, role) in enumerate(zip(config.players, roles), start=1):
+        for index, (seat, role) in enumerate(zip(seats, roles), start=1):
             player_id = f"p{index}"
             controller = self._controller_for(
                 player_id,
@@ -217,6 +220,7 @@ class Game:
         return {
             "language": self.config.language,
             "role_preset": self.config.role_preset,
+            "rules": asdict(self.config.rules),
             "players": [
                 {
                     "name": seat.name,
@@ -333,7 +337,7 @@ class Game:
             player.lover_id = saved.get("lover_id")
             skills = resolve_player_skills(
                 player.role,
-                list(self.config.players[index].skills),
+                list(self._seat_configs[index].skills),
             )
             if self.config.role_preset != "classic":
                 skills = add_movie_survival_skill(skills)
@@ -399,8 +403,29 @@ class Game:
         if self._checkpoint_path is not None:
             self._checkpoint_path.unlink(missing_ok=True)
 
-    def _roles(self) -> list[Role]:
-        fixed = [player.fixed_role for player in self.config.players]
+    def _ordered_seats(
+        self,
+        resume_checkpoint: str | Path | None,
+    ) -> list[PlayerConfig]:
+        """Randomize fresh seats or restore their exact checkpoint ordering."""
+        seats = list(self.config.players)
+        if resume_checkpoint is not None:
+            raw = json.loads(Path(resume_checkpoint).read_text(encoding="utf-8"))
+            saved_players = raw.get("players", [])
+            names = [
+                saved.get("name") for saved in saved_players if isinstance(saved, dict)
+            ]
+            by_name = {seat.name: seat for seat in seats}
+            if len(names) != len(seats) or set(names) != by_name.keys():
+                msg = "Checkpoint seat order does not match the supplied players"
+                raise ValueError(msg)
+            return [by_name[str(name)] for name in names]
+        if self.config.rules.randomize_seating:
+            self.rng.shuffle(seats)
+        return seats
+
+    def _roles(self, seats: list[PlayerConfig]) -> list[Role]:
+        fixed = [player.fixed_role for player in seats]
         if all(role is not None for role in fixed):
             roles = [role for role in fixed if role is not None]
             wolves = sum(role is Role.WEREWOLF for role in roles)
@@ -904,13 +929,15 @@ class Game:
 
     def _daytime(self) -> None:
         self.phase = "discussion"
+        speakers = self._discussion_order()
+        start_name = speakers[0].name if speakers else self._t("无人", "nobody")
         self._announce(
             self._t(
-                f"第 {self.day} 天，开始公开讨论。",
-                f"Day {self.day}. Public discussion begins.",
+                f"第 {self.day} 天，开始公开讨论。本日从 {start_name} 起按座位顺序发言。",
+                f"Day {self.day}. Public discussion begins with {start_name} and proceeds in seat order.",
             ),
         )
-        for player in list(self._alive()):
+        for player in speakers:
             response = self._act(
                 player,
                 ActionRequest(
@@ -980,6 +1007,14 @@ class Game:
                 f"Voting ends. {target_name} is eliminated.",
             ),
         )
+
+    def _discussion_order(self) -> list[PlayerState]:
+        """Rotate living seats around a random daily discussion starting point."""
+        alive = list(self._alive())
+        if len(alive) < 2 or not self.config.rules.randomize_discussion_start:
+            return alive
+        start = self.rng.randrange(len(alive))
+        return [*alive[start:], *alive[:start]]
 
     def _collect_votes(
         self,
@@ -1155,9 +1190,10 @@ class Game:
         if self.config.spectator_progress:
             self.terminal.progress(self._spectator_action_text(player, request))
             if isinstance(player.controller, LLMController):
+                effort = player.controller.client.config.reasoning_effort or "default"
                 heartbeat = threading.Thread(
                     target=self._spectator_heartbeat,
-                    args=(heartbeat_stop,),
+                    args=(heartbeat_stop, effort),
                     daemon=True,
                 )
                 heartbeat.start()
@@ -1168,6 +1204,7 @@ class Game:
             heartbeat_stop.set()
             if heartbeat is not None:
                 heartbeat.join(timeout=1)
+                self.terminal.clear_transient_progress()
         private_note = "\n".join(
             part for part in (response.thought, response.note) if part.strip()
         )
@@ -1320,13 +1357,15 @@ class Game:
             ),
         )
 
-    def _spectator_heartbeat(self, stop: threading.Event) -> None:
-        """Emit periodic safe liveness signals while one LLM request is pending."""
-        while not stop.wait(12):
-            self.terminal.progress(
+    def _spectator_heartbeat(self, stop: threading.Event, effort: str) -> None:
+        """Update one transient elapsed-time status while an LLM call is pending."""
+        started = time.monotonic()
+        while not stop.wait(1):
+            elapsed = int(time.monotonic() - started)
+            self.terminal.transient_progress(
                 self._t(
-                    "LLM 仍在进行 xhigh 推理……",
-                    "The LLM is still reasoning at xhigh effort...",
+                    f"LLM {effort} 推理中：{elapsed} 秒",
+                    f"LLM {effort} reasoning: {elapsed} seconds",
                 ),
             )
 
