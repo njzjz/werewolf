@@ -1571,6 +1571,9 @@ class Game:
                 if part
             ),
         )
+        token_usage = self._llm_token_usage_text()
+        if token_usage:
+            self.terminal.progress(token_usage)
         if self.config.memory_directory:
             self.export_memories(self.config.memory_directory)
         self._clear_checkpoint()
@@ -1581,6 +1584,29 @@ class Game:
             days=self.day,
             survivors=tuple(player.name for player in self._alive()),
             reason=reason,
+        )
+
+    def _llm_token_usage_text(self) -> str:
+        """Summarize provider-reported cache usage without exposing player data."""
+        clients = {
+            id(player.controller.client): player.controller.client
+            for player in self.players
+            if isinstance(player.controller, LLMController)
+        }.values()
+        input_tokens = sum(client.observed_input_tokens for client in clients)
+        cached_tokens = sum(client.observed_cached_tokens for client in clients)
+        output_tokens = sum(client.observed_output_tokens for client in clients)
+        usage_responses = sum(client.observed_usage_responses for client in clients)
+        if input_tokens <= 0:
+            return ""
+        cache_rate = cached_tokens / input_tokens
+        return self._t(
+            "本进程已观测到的 LLM token："
+            f"输入 {input_tokens}，缓存命中 {cached_tokens}（{cache_rate:.1%}），"
+            f"输出 {output_tokens}；provider 返回 usage 的响应共 {usage_responses} 次。",
+            "LLM tokens observed in this process: "
+            f"{input_tokens} input, {cached_tokens} cached ({cache_rate:.1%}), "
+            f"{output_tokens} output across {usage_responses} responses with usage.",
         )
 
     def export_memories(self, directory: str | Path) -> list[Path]:

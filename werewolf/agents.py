@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import random
@@ -12,7 +13,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -325,6 +326,10 @@ class OpenAICompatibleClient:
 
     config: LLMProviderConfig
     transport: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    observed_input_tokens: int = field(default=0, init=False)
+    observed_cached_tokens: int = field(default=0, init=False)
+    observed_output_tokens: int = field(default=0, init=False)
+    observed_usage_responses: int = field(default=0, init=False)
 
     def complete(self, messages: list[dict[str, str]]) -> str:
         """Return assistant content from an OpenAI-compatible response."""
@@ -335,6 +340,7 @@ class OpenAICompatibleClient:
             return self._post_stream(payload)
         else:
             response = self._post(payload)
+        self._record_usage(response)
         if self.config.wire_api == "responses":
             return self._responses_content(response)
         try:
@@ -358,6 +364,12 @@ class OpenAICompatibleClient:
                 "max_output_tokens": self.config.max_tokens,
                 "store": False,
             }
+            if self.config.prompt_cache:
+                payload["prompt_cache_key"] = self._prompt_cache_key(messages)
+                if self.config.prompt_cache_retention:
+                    payload["prompt_cache_retention"] = (
+                        self.config.prompt_cache_retention
+                    )
             if self.config.reasoning_effort:
                 payload["reasoning"] = {"effort": self.config.reasoning_effort}
             if self.config.use_json_mode:
@@ -372,6 +384,59 @@ class OpenAICompatibleClient:
         if self.config.use_json_mode:
             payload["response_format"] = {"type": "json_object"}
         return payload
+
+    @staticmethod
+    def _prompt_cache_key(messages: list[dict[str, str]]) -> str:
+        """Hash the stable system prefix into a short, non-secret cache key.
+
+        The key deliberately excludes changing history and action fields. Each
+        player system prompt contains their name, role, persona, and private
+        skills, so distinct private contexts cannot accidentally share a key.
+        """
+        stable_prefix = messages[:1]
+        serialized = json.dumps(
+            stable_prefix,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(serialized.encode()).hexdigest()[:32]
+        return f"werewolf-v1-{digest}"
+
+    @property
+    def observed_cache_hit_rate(self) -> float | None:
+        """Return the provider-reported cached share of observed input tokens."""
+        if self.observed_input_tokens <= 0:
+            return None
+        return self.observed_cached_tokens / self.observed_input_tokens
+
+    def _record_usage(self, response: dict[str, Any]) -> bool:
+        """Accumulate Responses and Chat token usage without logging prompts."""
+        usage = response.get("usage")
+        if not isinstance(usage, dict):
+            return False
+        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
+        output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
+        input_details = usage.get(
+            "input_tokens_details",
+            usage.get("prompt_tokens_details", {}),
+        )
+        cached_tokens = (
+            input_details.get("cached_tokens", 0)
+            if isinstance(input_details, dict)
+            else 0
+        )
+        if not isinstance(input_tokens, int):
+            return False
+        self.observed_input_tokens += input_tokens
+        self.observed_cached_tokens += (
+            cached_tokens if isinstance(cached_tokens, int) else 0
+        )
+        self.observed_output_tokens += (
+            output_tokens if isinstance(output_tokens, int) else 0
+        )
+        self.observed_usage_responses += 1
+        return True
 
     @staticmethod
     def _responses_content(response: dict[str, Any]) -> str:
@@ -461,6 +526,7 @@ class OpenAICompatibleClient:
         """Extract assistant text deltas from Responses or Chat SSE events."""
         parts: list[str] = []
         completed_response: dict[str, Any] | None = None
+        stream_usage: dict[str, Any] | None = None
         for raw_line in lines:
             line = raw_line.decode(errors="replace").strip()
             if not line.startswith("data:"):
@@ -474,6 +540,8 @@ class OpenAICompatibleClient:
                 msg = f"Malformed streaming event: {data_text[:500]}"
                 raise RuntimeError(msg) from exc
             event_type = event.get("type")
+            if isinstance(event.get("usage"), dict):
+                stream_usage = event["usage"]
             if event_type in {"error", "response.failed"}:
                 error = event.get("error") or event.get("response", {}).get("error")
                 msg = f"LLM streaming API failed: {error or event!r}"
@@ -505,6 +573,13 @@ class OpenAICompatibleClient:
                         for item in content
                         if isinstance(item, dict)
                     )
+        usage_recorded = (
+            self._record_usage(completed_response)
+            if completed_response is not None
+            else False
+        )
+        if not usage_recorded and stream_usage is not None:
+            self._record_usage({"usage": stream_usage})
         if parts:
             return "".join(parts)
         if completed_response is not None:
@@ -573,18 +648,15 @@ class LLMController:
             f"D{item.day}/{item.phase}: {item.text}" for item in view.thoughts
         ]
         history = "\n".join([*event_lines, "--- 私密策略笔记 ---", *thought_lines])
-        if len(history) > self.context_char_limit:
-            history = (
-                "[较早内容因上下文长度省略]\n" + history[-self.context_char_limit :]
-            )
+        history = self._trim_history(history)
         options = [
             {"value": item.value, "label": item.label} for item in request.options
         ]
-        user = (
+        history_message = f"你的可见历史：\n{history or '（暂无）'}"
+        current_request = (
             f"当前：第 {view.day} 天，阶段 {view.phase}\n"
             f"存活玩家：{[name for _, name in view.alive_players]}\n"
             f"死亡玩家：{[name for _, name in view.dead_players]}\n"
-            f"你的可见历史：\n{history or '（暂无）'}\n\n"
             f"法官请求：{request.prompt}\n动作类型：{request.kind.value}\n"
             f"合法选项：{json.dumps(options, ensure_ascii=False)}\n"
             f"允许弃权：{request.allow_abstain}\n"
@@ -592,8 +664,28 @@ class LLMController:
         )
         return [
             {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "user", "content": history_message},
+            {"role": "user", "content": current_request},
         ]
+
+    def _trim_history(self, history: str) -> str:
+        """Trim old history in stable chunks so its prefix does not slide each call.
+
+        A character-by-character rolling tail changes the first history token on
+        every request after the limit is reached, defeating prefix caching. The
+        chunked cutoff remains fixed for many calls and advances only when the
+        accumulated overflow crosses another chunk boundary.
+        """
+        marker = "[较早内容因上下文长度省略]\n"
+        target_length = self.context_char_limit - len(marker)
+        if len(history) <= self.context_char_limit:
+            return history
+        chunk_size = max(512, min(4096, self.context_char_limit // 8))
+        overflow = len(history) - target_length
+        cutoff_target = ((overflow + chunk_size - 1) // chunk_size) * chunk_size
+        line_break = history.find("\n", cutoff_target)
+        cutoff = line_break + 1 if line_break >= 0 else cutoff_target
+        return marker + history[cutoff:]
 
     @staticmethod
     def _parse_json(raw: str) -> dict[str, Any]:

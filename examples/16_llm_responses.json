@@ -12,6 +12,7 @@
       "wire_api": "responses",
       "reasoning_effort": "low",
       "use_json_mode": false,
+      "prompt_cache": true,
       "force_ipv4": false,
       "timeout": 120,
       "max_tokens": 500

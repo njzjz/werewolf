@@ -9,9 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from werewolf.agents import Terminal
+from werewolf.agents import LLMController, OpenAICompatibleClient, Terminal
 from werewolf.config import (
     GameConfig,
+    LLMProviderConfig,
     PlayerConfig,
     RuleConfig,
     demo_config,
@@ -314,6 +315,28 @@ def test_spectator_progress_streams_without_revealing_private_actor() -> None:
     assert terminal.progress_events[1] == "一项夜间私密行动正在处理中……"
     assert "玩家1" not in terminal.progress_events[1]
     assert "狼人" not in terminal.progress_events[1]
+
+
+def test_llm_token_summary_reports_cache_hits_without_private_context() -> None:
+    """The terminal metric should expose counts but no player-private prompt."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+    )
+    client.observed_input_tokens = 2000
+    client.observed_cached_tokens = 1200
+    client.observed_output_tokens = 100
+    client.observed_usage_responses = 2
+    game = Game(
+        fixed_config(),
+        controllers={"p1": LLMController(client, persona="私密人物设定")},
+        terminal=SilentTerminal(),
+    )
+
+    summary = game._llm_token_usage_text()  # noqa: SLF001
+
+    assert "输入 2000" in summary
+    assert "缓存命中 1200（60.0%）" in summary
+    assert "私密人物设定" not in summary
 
 
 def test_strict_controllers_never_fall_back_to_local_bot() -> None:
