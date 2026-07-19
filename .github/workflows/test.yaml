@@ -1,0 +1,37 @@
+name: Test Python package
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+env:
+  UV_SYSTEM_PYTHON: 1
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read # for private repos
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            **/requirements*.txt
+            **/pyproject.toml
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: 3.14
+      - name: Install dependencies
+        run: uv pip install nox[uv]
+      - name: Test with pytest
+        run: nox -db uv
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          use_oidc: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
