@@ -74,7 +74,7 @@ ROLE_SKILLS: dict[Role, Skill] = {
     ),
     Role.BODYGUARD: Skill(
         name="role_bodyguard",
-        description="保镖守护策略",
+        description="守卫守护策略",
         instructions=(
             "每晚基于公开可信度、技能价值和狼人袭击动机选择一名其他玩家保护。守护成功不会自动"
             "确认目标身份，平安夜也可能来自狼人袭击妖狐或其他原因；不要泄露守护计划给狼人。"

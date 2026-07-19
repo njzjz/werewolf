@@ -63,7 +63,7 @@ ROLE_NAMES: dict[str, dict[Role, str]] = {
         Role.WITCH: "女巫",
         Role.HUNTER: "猎人",
         Role.MEDIUM: "灵媒师",
-        Role.BODYGUARD: "保镖",
+        Role.BODYGUARD: "守卫",
         Role.MADMAN: "狂人",
         Role.FOX: "妖狐",
         Role.CUPID: "丘比特",
