@@ -79,6 +79,8 @@ Unix/Linux/macOS 下真人输入会自动启用系统 `readline`/`libedit`：左
       "use_json_mode": false,
       "wire_api": "responses",
       "reasoning_effort": "low",
+      "prompt_cache": true,
+      "prompt_cache_retention": "24h",
       "force_ipv4": false
     }
   },
@@ -109,6 +111,10 @@ Unix/Linux/macOS 下真人输入会自动启用系统 `readline`/`libedit`：左
 同一局可以配置多个 provider，从而混用 OpenAI、代理服务或本地 OpenAI-compatible 服务。`wire_api` 支持传统的 `chat`（`/chat/completions`）和 Codex 常用的 `responses`（`/responses`）。推荐通过 `api_key_env` 读取密钥，避免把真实密钥写进配置文件。若兼容服务不支持 JSON mode，将 `use_json_mode` 设为 `false`；模型仍会被提示返回 JSON。若域名同时提供 IPv4/IPv6、但当前环境无法连接 IPv6，可设置 `force_ipv4: true`，客户端仍会保留正常的 TLS 主机名验证。
 
 兼容服务支持 SSE 时建议设置 `stream: true`。客户端会持续接收 Responses 或 Chat 的文本增量并在本地组装完整 JSON，可降低长时间 `xhigh` 推理经过代理时发生 524 的概率。增量中的私密思考、狼聊和技能选择不会直接打印到公开观战日志；只有完整响应通过 JSON 与合法性校验后才进入游戏状态。
+
+Responses provider 可设置 `prompt_cache: true` 来提高 OpenAI Prompt Caching 的命中率。客户端会把每名玩家稳定的 system 前缀散列成不含明文身份信息的独立 `prompt_cache_key`，不会让不同私密上下文共用缓存键；`prompt_cache_retention` 可选 `in-memory` 或 `24h`，具体支持范围取决于模型和兼容服务。未开启时不会发送这些扩展字段，因此不支持它们的代理或本地服务仍可正常使用；如果上游本身提供自动前缀缓存，下面的提示词重排仍然可以直接提高命中率。
+
+提示词也按缓存友好的顺序组织：稳定规则、身份和 skill 在最前，持续增长的个人可见历史居中，天数、存活名单、合法选项和本次法官请求放在最后。历史超过 `context_char_limit` 后按稳定区块裁剪，而不是每轮移动一个字符。游戏结束时，如果 provider 返回了 `usage`，终端会汇总输入 token、缓存命中 token、命中率和输出 token；恢复后的统计仅代表当前进程。参见 [OpenAI Prompt Caching 文档](https://developers.openai.com/api/docs/guides/prompt-caching)。
 
 玩家技能分为三层，并在开局分配身份后自动合并：
 

@@ -129,7 +129,132 @@ def test_responses_api_payload_and_output_shape() -> None:
     assert captured["input"] == [{"role": "user", "content": "行动"}]
     assert captured["reasoning"] == {"effort": "low"}
     assert captured["store"] is False
+    assert "prompt_cache_key" not in captured
     assert "messages" not in captured
+
+
+def test_responses_prompt_cache_uses_stable_private_key_and_tracks_usage() -> None:
+    """Cache routing should be stable, private, and measurable from API usage."""
+    captured: list[dict[str, Any]] = []
+
+    def transport(payload: dict[str, Any]) -> dict[str, Any]:
+        captured.append(payload)
+        return {
+            "output_text": '{"text":"收到"}',
+            "usage": {
+                "input_tokens": 1600,
+                "input_tokens_details": {"cached_tokens": 1024},
+                "output_tokens": 80,
+            },
+        }
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(
+            base_url="https://example.invalid/v1",
+            model="reasoning-model",
+            wire_api="responses",
+            use_json_mode=False,
+            prompt_cache=True,
+            prompt_cache_retention="24h",
+        ),
+        transport=transport,
+    )
+    stable_system = "一号的私密身份与技能"
+
+    client.complete(
+        [
+            {"role": "system", "content": stable_system},
+            {"role": "user", "content": "第一轮动态请求"},
+        ],
+    )
+    client.complete(
+        [
+            {"role": "system", "content": stable_system},
+            {"role": "user", "content": "第二轮动态请求"},
+        ],
+    )
+
+    first_key = captured[0]["prompt_cache_key"]
+    assert first_key == captured[1]["prompt_cache_key"]
+    other_key = client._payload(  # noqa: SLF001 - cache isolation is under test.
+        [{"role": "system", "content": "二号的另一份私密身份与技能"}],
+    )["prompt_cache_key"]
+    assert other_key != first_key
+    assert stable_system not in first_key
+    assert len(first_key) <= 64
+    assert captured[0]["prompt_cache_retention"] == "24h"
+    assert client.observed_input_tokens == 3200
+    assert client.observed_cached_tokens == 2048
+    assert client.observed_output_tokens == 160
+    assert client.observed_usage_responses == 2
+    assert client.observed_cache_hit_rate == 0.64
+
+
+def test_llm_places_append_only_history_before_dynamic_action() -> None:
+    """Changing the current action must not invalidate the cached history prefix."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+    )
+    controller = LLMController(client, persona="谨慎")
+    view = PlayerView(
+        player_id="p1",
+        name="一号",
+        role=Role.VILLAGER,
+        role_name="平民",
+        role_description="没有夜间技能",
+        faction=Faction.GOOD,
+        lover=None,
+        alive_players=(("p1", "一号"), ("p2", "二号")),
+        dead_players=(),
+        events=(
+            MemoryEvent(
+                sequence=1,
+                day=1,
+                phase="day",
+                text="稳定的公开历史",
+                visibility=Visibility.PUBLIC,
+            ),
+        ),
+        thoughts=(),
+        skills=(),
+        day=1,
+        phase="vote",
+        language="zh-CN",
+    )
+
+    first = controller._messages(  # noqa: SLF001 - prompt layout is the unit under test.
+        view,
+        ActionRequest(ActionKind.SPEAK, "请发言"),
+    )
+    second = controller._messages(  # noqa: SLF001 - prompt layout is the unit under test.
+        view,
+        ActionRequest(
+            ActionKind.VOTE,
+            "请选择目标",
+            (ActionOption("p2", "二号"),),
+        ),
+    )
+
+    assert first[:2] == second[:2]
+    assert "稳定的公开历史" in first[1]["content"]
+    assert "当前：" not in first[1]["content"]
+    assert "当前：" in first[2]["content"]
+    assert first[2] != second[2]
+
+
+def test_history_trimming_advances_in_cache_friendly_chunks() -> None:
+    """Small appends beyond the limit should retain the same trimmed prefix."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+    )
+    controller = LLMController(client, context_char_limit=2000)
+    history = "\n".join(f"事件{index:03d}:" + "证据" * 20 for index in range(80))
+
+    first = controller._trim_history(history)  # noqa: SLF001
+    second = controller._trim_history(history + "\n新增短事件")  # noqa: SLF001
+
+    assert second.startswith(first)
+    assert len(second) <= controller.context_char_limit
 
 
 def test_terminal_persists_only_explicit_public_output(tmp_path) -> None:
@@ -184,9 +309,11 @@ def test_responses_sse_stream_is_assembled_without_exposing_partial_json() -> No
             b"event: response.output_text.delta\n",
             b'data: {"type":"response.output_text.delta","delta":"{\\"text\\":\\"ni"}\n',
             b'data: {"type":"response.output_text.delta","delta":"hao\\"}"}\n',
-            b'data: {"type":"response.completed","response":{}}\n',
+            b'data: {"type":"response.completed","response":{"usage":{"input_tokens":1200,"input_tokens_details":{"cached_tokens":1024},"output_tokens":30}}}\n',
             b"data: [DONE]\n",
         ],
     )
 
     assert content == '{"text":"nihao"}'
+    assert client.observed_input_tokens == 1200
+    assert client.observed_cached_tokens == 1024

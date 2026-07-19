@@ -14,6 +14,7 @@ from .skills import resolve_skills
 SUPPORTED_LANGUAGES = {"zh-CN", "en"}
 SUPPORTED_CONTROLLERS = {"human", "llm", "bot"}
 SUPPORTED_WIRE_APIS = {"chat", "responses"}
+SUPPORTED_PROMPT_CACHE_RETENTIONS = {"in-memory", "24h"}
 ROLE_PRESET_SIZES: dict[str, int | None] = {
     "classic": None,
     "movie_basic": 10,
@@ -28,7 +29,7 @@ MAX_PLAYERS = 16
 
 @dataclass(frozen=True)
 class LLMProviderConfig:
-    """Connection details for an OpenAI-compatible chat-completions API."""
+    """Connection details for an OpenAI-compatible inference API."""
 
     base_url: str
     model: str
@@ -42,6 +43,8 @@ class LLMProviderConfig:
     reasoning_effort: str | None = None
     force_ipv4: bool = False
     stream: bool = False
+    prompt_cache: bool = False
+    prompt_cache_retention: str | None = None
     extra_headers: dict[str, str] = field(default_factory=dict)
 
     def resolved_api_key(self) -> str | None:
@@ -120,6 +123,8 @@ def _provider_from_dict(raw: dict[str, Any]) -> LLMProviderConfig:
         reasoning_effort=raw.get("reasoning_effort"),
         force_ipv4=bool(raw.get("force_ipv4", False)),
         stream=bool(raw.get("stream", False)),
+        prompt_cache=bool(raw.get("prompt_cache", False)),
+        prompt_cache_retention=raw.get("prompt_cache_retention"),
         extra_headers={str(k): str(v) for k, v in raw.get("extra_headers", {}).items()},
     )
 
@@ -234,6 +239,27 @@ def validate_config(config: GameConfig) -> None:
         if provider.wire_api not in SUPPORTED_WIRE_APIS:
             msg = f"Provider {name!r} uses unsupported wire_api {provider.wire_api!r}"
             raise ValueError(msg)
+        if provider.prompt_cache and provider.wire_api != "responses":
+            msg = (
+                f"Provider {name!r} enables prompt_cache, which currently requires "
+                "wire_api='responses'"
+            )
+            raise ValueError(msg)
+        if (
+            provider.prompt_cache_retention is not None
+            and provider.prompt_cache_retention not in SUPPORTED_PROMPT_CACHE_RETENTIONS
+        ):
+            msg = (
+                f"Provider {name!r} uses unsupported prompt_cache_retention "
+                f"{provider.prompt_cache_retention!r}"
+            )
+            raise ValueError(msg)
+        if provider.prompt_cache_retention and not provider.prompt_cache:
+            msg = (
+                f"Provider {name!r} sets prompt_cache_retention without enabling "
+                "prompt_cache"
+            )
+            raise ValueError(msg)
     if config.rules.max_days < 1 or config.rules.wolf_chat_rounds < 0:
         msg = "max_days must be positive and wolf_chat_rounds cannot be negative"
         raise ValueError(msg)
@@ -288,6 +314,8 @@ def example_config() -> dict[str, Any]:
                 "use_json_mode": True,
                 "wire_api": "chat",
                 "stream": False,
+                "prompt_cache": False,
+                "prompt_cache_retention": None,
             },
         },
         "rules": asdict(RuleConfig()),
