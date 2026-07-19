@@ -41,6 +41,8 @@ python -m werewolf play --config werewolf.json
 
 多人真人共用一个终端时，保持默认的 `clear_screen: true`。程序会在私密回合之间清屏并要求交接终端，以减少旁观泄密。终端回滚缓冲仍由操作系统和终端软件控制，因此正式线下局建议每名真人使用独立进程/设备，或确保其他玩家不查看回滚内容。
 
+Unix/Linux/macOS 下真人输入会自动启用系统 `readline`/`libedit`：左右方向键可以移动光标，退格键会按 Unicode 字符删除中文，而不是破坏 UTF-8 字节。若运行环境没有提供 readline，程序会回退到 Python 的基础输入行为。
+
 ## 配置
 
 `werewolf init` 会生成完整 JSON。核心结构如下：
@@ -145,7 +147,7 @@ python -m werewolf play --config werewolf.json
 
 ### LLM 观战进度流
 
-长推理模型在夜间连续执行私密动作时，公开频道可能长时间没有游戏事件。设置 `spectator_progress: true` 或使用 `werewolf play --spectator` 后，终端会立即输出安全的行动状态，并在单次调用超过 12 秒时持续输出推理心跳。公开发言仍会在生成完成后立刻逐人显示；夜间状态统一写成“私密行动”，不会泄露具体身份、目标、狼聊或心路历程。
+长推理模型在夜间连续执行私密动作时，公开频道可能长时间没有游戏事件。设置 `spectator_progress: true` 或使用 `werewolf play --spectator` 后，终端会立即输出安全的行动状态。LLM 推理期间只使用同一行显示当前推理强度和已持续秒数，完成后自动清除，不再反复刷出心跳行，也不会把每秒状态写进公开日志。公开发言仍会在生成完成后立刻逐人显示；夜间状态统一写成“私密行动”，不会泄露具体身份、目标、狼聊或心路历程。
 
 正式的 100% LLM 对局建议同时设置 `strict_controllers: true`，或使用：
 
@@ -233,11 +235,17 @@ werewolf play --config examples/movie_mad_land.json
   "first_night_last_words": true,
   "night_death_last_words": false,
   "day_vote_last_words": true,
-  "hunter_shot_last_words": false
+  "hunter_shot_last_words": false,
+  "randomize_discussion_start": true,
+  "randomize_seating": true
 }
 ```
 
 默认遗言规则为：首夜死亡和白天放逐可遗言，第二夜起的夜间死亡以及被猎人带走者无遗言。`last_words: false` 可整体关闭遗言，其余字段可用于桌规调整。
+
+默认每天由法官从存活玩家中随机选择一个发言起点，再按座位环形顺序进行，不会固定从 1 号位开始。设置 `randomize_discussion_start: false` 可恢复固定座位顺序。
+
+默认开局会先打乱玩家座位，再分配 `p1`、`p2` 等内部座位号和身份。因此配置文件中把真人写在第一个仅代表名单顺序，不代表真人永远坐 1 号位。设置 `randomize_seating: false` 可用于固定座位测试；恢复游戏时始终沿用恢复点中的实际座位顺序，不会再次洗座。
 
 `seed` 只控制身份洗牌、平票裁决和本地机器人动作；真实 LLM 的输出仍可能不确定。配置中的 `fixed_role` 仅用于可复现测试或主持人预设，并且必须给所有玩家同时设置。正常游戏不要使用它，因为能读取配置的人会看到身份。
 

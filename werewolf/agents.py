@@ -8,6 +8,7 @@ import random
 import re
 import socket
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +23,11 @@ from .models import (
     PlayerView,
     Visibility,
 )
+
+try:
+    import readline as _readline
+except ImportError:  # pragma: no cover - unavailable on some non-POSIX builds.
+    _readline = None
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -113,6 +119,8 @@ class Terminal:
         reset_transcript: bool = True,
     ) -> None:
         self.clear_screen = clear_screen
+        self._output_lock = threading.RLock()
+        self._transient_progress_active = False
         self.transcript_path = Path(transcript_path) if transcript_path else None
         if self.transcript_path is not None:
             self.transcript_path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,15 +132,32 @@ class Terminal:
     def clear(self) -> None:
         """Clear only interactive terminals; captured logs remain readable."""
         if self.clear_screen and sys.stdout.isatty():
-            print("\033[2J\033[H", end="", flush=True)
+            with self._output_lock:
+                self._clear_transient_progress_locked()
+                print("\033[2J\033[H", end="", flush=True)
 
     def announce(self, text: str) -> None:
         """Print a public judge announcement."""
         self._emit(f"\n[法官] {text}")
 
     def progress(self, text: str) -> None:
-        """Print a non-authoritative spectator heartbeat without game secrets."""
+        """Print a persistent spectator event without game secrets."""
         self._emit(f"[观战] {text}")
+
+    def transient_progress(self, text: str) -> None:
+        """Update one in-place TTY status without appending it to public logs."""
+        if not sys.stdout.isatty():
+            return
+        with self._output_lock:
+            print(f"\r\033[2K[观战] {text}", end="", flush=True)
+            self._transient_progress_active = True
+
+    def clear_transient_progress(self) -> None:
+        """Remove the current in-place status line after an action completes."""
+        if not sys.stdout.isatty():
+            return
+        with self._output_lock:
+            self._clear_transient_progress_locked()
 
     def say(self, player_name: str, text: str) -> None:
         """Print and persist one completed public player statement."""
@@ -140,10 +165,18 @@ class Terminal:
 
     def _emit(self, rendered: str) -> None:
         """Write a public line to stdout and the optional spectator transcript."""
-        print(rendered, flush=True)
-        if self.transcript_path is not None:
-            with self.transcript_path.open("a", encoding="utf-8") as file:
-                file.write(rendered + "\n")
+        with self._output_lock:
+            self._clear_transient_progress_locked()
+            print(rendered, flush=True)
+            if self.transcript_path is not None:
+                with self.transcript_path.open("a", encoding="utf-8") as file:
+                    file.write(rendered + "\n")
+
+    def _clear_transient_progress_locked(self) -> None:
+        """Clear transient output while the caller holds ``_output_lock``."""
+        if self._transient_progress_active:
+            print("\r\033[2K", end="", flush=True)
+            self._transient_progress_active = False
 
     def transcript_size(self) -> int | None:
         """Return the current public transcript size in bytes, if configured."""
@@ -209,6 +242,19 @@ class HumanController:
 
     def __init__(self, terminal: Terminal) -> None:
         self.terminal = terminal
+        self._enable_line_editing()
+
+    @staticmethod
+    def _enable_line_editing() -> None:
+        """Enable Unicode-aware deletion and cursor movement when readline exists."""
+        if _readline is None:
+            return
+        for binding in (
+            "set editing-mode emacs",
+            '"\\e[D": backward-char',
+            '"\\e[C": forward-char',
+        ):
+            _readline.parse_and_bind(binding)
 
     def act(self, view: PlayerView, request: ActionRequest) -> AgentResponse:
         """Collect a validated choice and an optional private strategy note."""
