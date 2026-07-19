@@ -117,6 +117,16 @@ def test_sixteen_llm_case_config_is_loadable() -> None:
     assert all(player.controller == "llm" for player in config.players)
     assert config.providers["responses"].wire_api == "responses"
 
+    transcript = (
+        path.parent / "case_studies" / "16_llm_2026-07-20_public_transcript.txt"
+    ).read_text(encoding="utf-8")
+    assert "[法官] 狼人阵营获胜" in transcript
+    assert "达到最大天数" not in transcript
+    assert "[恢复]" not in transcript
+    assert "[技术回滚]" not in transcript
+    assert "控制器调用失败" not in transcript
+    assert "OPENAI_API_KEY" not in transcript
+
 
 def test_offline_game_completes_and_exports_separate_memories(tmp_path: Path) -> None:
     """A full judge-only simulation should terminate without any API access."""

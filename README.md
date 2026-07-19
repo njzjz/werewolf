@@ -174,6 +174,8 @@ export OPENAI_API_KEY='你的密钥'
 werewolf play --config examples/16_llm_responses.json
 ```
 
+案例的[最终有效公开频道完整记录](examples/case_studies/16_llm_2026-07-20_public_transcript.txt)也保存在仓库中。该记录只包含法官公告、公开发言、公开投票、合法遗言和终局身份；狼人夜聊、角色私密信息、个人心路历程及 API 信息均未上传。
+
 ### 有效对局时间线
 
 | 阶段 | 事件 | 规则与局势影响 |
