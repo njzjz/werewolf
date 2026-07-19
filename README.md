@@ -1,5 +1,224 @@
-# Python template
+# LLM 狼人杀
 
-<!-- [![PyPI - Version](https://img.shields.io/pypi/v/python-template)](https://pypi.org/p/python-template) -->
+一款纯终端运行的狼人杀游戏。玩家可以是真人、OpenAI-compatible LLM，或用于离线演示的本地机器人；法官和规则判定全部由 Python 程序负责，不调用 LLM。
 
-`python-template` is a template to start a new Python project quickly.
+## 功能
+
+- 完整昼夜循环：狼人夜聊与袭击、预言家查验、女巫解药/毒药、猎人开枪、公开讨论、投票、平票辩解与重投、胜负判定。
+- 真人与 LLM 可以混坐；不同 LLM 玩家可以使用不同的 API、模型、人物设定和技能。
+- 每名玩家拥有独立的可见事件、私密策略笔记（心路历程）和技能提示，游戏结束后可分别导出 JSON 记忆。
+- 信息按收件人投递。公开、单人私密、狼人频道三种消息在进入玩家上下文之前就已经完成权限裁剪。
+- 默认中文法官和中文 LLM 提示；配置采用 `language` 字段，目前内置 `zh-CN` 和 `en`，便于继续扩展语言目录。
+- 运行时零第三方依赖，OpenAI-compatible API 使用 Python 标准库访问。
+
+## 快速开始
+
+项目要求 Python 3.9 或更高版本。
+
+```bash
+python -m pip install -e .
+
+# 不需要 API，先看一局 8 人本地机器人演示
+werewolf demo --players 8 --seed 7
+
+# 生成“1 真人 + 7 LLM”配置
+werewolf init werewolf.json
+export OPENAI_API_KEY='你的密钥'
+werewolf play --config werewolf.json
+```
+
+也可以不安装，直接运行：
+
+```bash
+python -m werewolf demo
+python -m werewolf init
+python -m werewolf play --config werewolf.json
+```
+
+多人真人共用一个终端时，保持默认的 `clear_screen: true`。程序会在私密回合之间清屏并要求交接终端，以减少旁观泄密。终端回滚缓冲仍由操作系统和终端软件控制，因此正式线下局建议每名真人使用独立进程/设备，或确保其他玩家不查看回滚内容。
+
+## 配置
+
+`werewolf init` 会生成完整 JSON。核心结构如下：
+
+```json
+{
+  "language": "zh-CN",
+  "seed": null,
+  "clear_screen": true,
+  "memory_directory": "game_memories",
+  "context_char_limit": 24000,
+  "providers": {
+    "default": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "model": "gpt-4.1-mini",
+      "temperature": 0.7,
+      "timeout": 120,
+      "max_tokens": 700,
+      "use_json_mode": true,
+      "wire_api": "chat"
+    },
+    "local": {
+      "base_url": "http://127.0.0.1:8000/v1",
+      "api_key": "local-placeholder",
+      "model": "your-local-model",
+      "use_json_mode": false,
+      "wire_api": "responses",
+      "reasoning_effort": "low",
+      "force_ipv4": false
+    }
+  },
+  "players": [
+    {
+      "name": "小明",
+      "controller": "human",
+      "persona": "谨慎的逻辑流玩家",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "阿狼",
+      "controller": "llm",
+      "provider": "default",
+      "persona": "发言简洁，擅长观察站边关系",
+      "skills": ["logic", "social", "deception", "memory"]
+    }
+  ]
+}
+```
+
+玩家控制器：
+
+- `human`：从当前终端读取发言、选择和私密策略笔记。
+- `llm`：调用玩家所指定的 provider；每次只发送该玩家的独立视图。
+- `bot`：不访问网络的简单本地机器人，适合演示和调试，不是 LLM。
+
+同一局可以配置多个 provider，从而混用 OpenAI、代理服务或本地 OpenAI-compatible 服务。`wire_api` 支持传统的 `chat`（`/chat/completions`）和 Codex 常用的 `responses`（`/responses`）。推荐通过 `api_key_env` 读取密钥，避免把真实密钥写进配置文件。若兼容服务不支持 JSON mode，将 `use_json_mode` 设为 `false`；模型仍会被提示返回 JSON。若域名同时提供 IPv4/IPv6、但当前环境无法连接 IPv6，可设置 `force_ipv4: true`，客户端仍会保留正常的 TLS 主机名验证。
+
+玩家技能分为三层，并在开局分配身份后自动合并：
+
+1. 所有玩家自动加载 `global_gamecraft`，用于证据分级、反共识裹挟、票型一致性和平票更新。
+2. 根据真实身份自动加载且只加载一个身份技能：`role_villager`、`role_werewolf`、`role_seer`、`role_witch` 或 `role_hunter`。
+3. 最后追加配置文件中的个性技能：
+
+- `logic`：追踪发言、投票和矛盾。
+- `social`：观察站边和关系变化。
+- `deception`：在不越过可见信息边界的前提下进行身份伪装。
+- `memory`：回顾个人历史并持续更新策略笔记。
+
+身份技能仅进入对应玩家的系统提示，不会泄露给其他座位。技能是行为指导，与法官实际执行的角色能力相互独立；预言家查验、女巫用药、猎人开枪等动作仍由规则引擎验证，LLM 不能自行宣称已经执行非法动作。
+
+## 信息隔离
+
+```text
+                  ┌─ 公开事件 ───────────────> 所有玩家的个人记忆
+确定性规则引擎 ───┼─ 身份/查验/女巫信息 ────> 指定玩家的个人记忆
+                  └─ 狼队消息 ───────────────> 明确列出的狼人收件人
+                                                    │
+                                                    v
+                                           真人界面或单个 LLM 请求
+```
+
+规则引擎持有唯一的真实角色表。控制器收到的是不可变 `PlayerView`，其中只有：
+
+- 自己的身份与角色说明；
+- 存活/死亡玩家姓名（不含隐藏身份）；
+- 已经投递给自己的公开、私密或狼队事件；
+- 自己的策略笔记和技能。
+
+全局审计记录不会直接交给 LLM，再依赖提示词要求它“不要看”；权限裁剪发生在构造 LLM 请求之前。测试套件也会验证私密消息和狼人消息没有进入无权玩家的记忆。
+
+## 本项目采用的规则
+
+这是无警长的经典简化规则，支持 6–16 人：
+
+- 6–8 人为 2 狼，9–11 人为 3 狼，12–14 人为 4 狼，15–16 人为 5 狼。
+- 固定包含预言家和女巫；7 人及以上加入猎人，其余为平民。
+- 狼人每夜先在私密频道交流，再分别投票；最高票目标被袭击，平票由法官的种子随机数裁决。
+- 预言家每夜查验一名其他存活玩家，只得知阵营。
+- 女巫有一瓶解药和一瓶毒药，每瓶整局限用一次；默认同夜不能同时使用。猎人被毒死不能开枪。
+- 白天依次公开发言和投票。最高票平局时，平票玩家辩解后重投；再次平票则无人出局。
+- 默认死亡不翻牌、允许遗言、禁止自投。狼人全部死亡则好人胜；存活狼人数大于等于存活好人数则狼人胜。
+
+可通过 `rules` 修改以下规则：
+
+```json
+{
+  "max_days": 20,
+  "wolf_chat_rounds": 1,
+  "witch_can_self_save": true,
+  "witch_can_use_two_potions_same_night": false,
+  "reveal_roles_on_death": false,
+  "allow_self_vote": false,
+  "last_words": true,
+  "first_night_last_words": true,
+  "night_death_last_words": false,
+  "day_vote_last_words": true,
+  "hunter_shot_last_words": false
+}
+```
+
+默认遗言规则为：首夜死亡和白天放逐可遗言，第二夜起的夜间死亡以及被猎人带走者无遗言。`last_words: false` 可整体关闭遗言，其余字段可用于桌规调整。
+
+`seed` 只控制身份洗牌、平票裁决和本地机器人动作；真实 LLM 的输出仍可能不确定。配置中的 `fixed_role` 仅用于可复现测试或主持人预设，并且必须给所有玩家同时设置。正常游戏不要使用它，因为能读取配置的人会看到身份。
+
+## 16 个 LLM 实战案例
+
+2026-07-20 使用 16 个相互隔离的 LLM 玩家完成了一局实际 API 对局。模型通过 OpenAI-compatible Responses API 接入，推理强度为 `low`；密钥仅从环境变量读取，没有写入配置、日志或记忆文件。身份配置为 5 狼、预言家、女巫、猎人和 8 平民，采用本 README 所述的标准遗言规则。
+
+可从 [16 LLM Responses 示例配置](examples/16_llm_responses.json) 开始复现：
+
+```bash
+# 先把示例中的 base_url 和 model 改为实际服务
+export OPENAI_API_KEY='你的密钥'
+werewolf play --config examples/16_llm_responses.json
+```
+
+### 有效对局时间线
+
+| 阶段 | 事件 | 规则与局势影响 |
+| --- | --- | --- |
+| 第 1 夜 | 狼人袭击 16，女巫 11 使用解药 | 平安夜；刀口只能提高 16 的好人概率，不等于查验金水 |
+| 第 1 天 | 几乎全场放逐女巫 11 | 11 在合法的白天遗言中公开身份、解药和刀口，但信息已无法阻止本轮误投 |
+| 第 2 夜 | 狼人击杀预言家 13 | 第二夜起夜死无遗言；13 的第二夜查验不会泄露 |
+| 第 2 天 | 全场放逐猎人 01，01 开枪带走平民 15 | 01 有白天遗言；15 属于猎人击杀，默认无遗言；好人连续损失两人 |
+| 第 3 夜 | 狼人击杀预言家首夜金水 08 | 狼队继续清理高可信好人 |
+| 第 3 天 | 狼人 02 与平民 06 平票，重投后 02 出局 | 好人通过比较平票新增解释，成功找出一狼 |
+| 第 4 夜 | 狼人击杀首夜刀口 16 | 形成 4 狼对 5 好人的生死轮 |
+| 第 4 天 | 除 10 外全员放逐平民 10 | 达到 4 狼对 4 好人，狼人阵营获胜 |
+
+最终存活狼人为 03、05、07、12。有效对局中 16/16 玩家都保存了独立心路历程，控制器失败 0 次、非法选择 0 次、狼队信息泄漏 0 次、消息收件人违规 0 次。
+
+### 复盘与经验蒸馏
+
+| 对象 | 案例教训 | 已蒸馏技能 |
+| --- | --- | --- |
+| 全体玩家 | 第 1、2、4 天多次出现近乎全票。LLM 容易把“多人重复同一疑点”误当成新增证据，也会把解释不完整过度升级成身份结论。平票轮之所以抓到 02，正是因为重新比较了新增解释。 | `global_gamecraft` 强制证据分级、独立嫌疑排序、反方解释、投票变更理由和平票后重新评估。 |
+| 平民 | 好人多次跟随共识放逐神职或平民；夜间刀口、被多人怀疑、发言长短都被赋予过高身份权重。 | `role_villager` 要求投票前给出首选/备选，检查是否只在跟随多数，不伪造能力，不把刀口或票数当身份确认。 |
+| 狼人 | 狼队成功隐藏在连续共识票中，优先击杀预言家、金水和刀口；但 02 在平票辩解中的证据比较落败。队友过度同调也可能形成可追踪关系链。 | `role_werewolf` 指导夜间确定袭击与白天站位，避免相同措辞和机械统一票型，并根据公开证据选择保护、切割或拉开距离。 |
+| 预言家 | 13 首日及时公开 08 金水是正确的信息保全；第二夜死亡后按规则不能再公布新查验，因此不能依赖死后补信息。 | `role_seer` 维护真实查验表，起跳时公布历次结果和后续查验方向，禁止包装或伪造结果。 |
+| 女巫 | 11 首夜正确救下 16，但直到被放逐后的遗言才公开身份和药物状态，已经无法改变投票。刀口也被部分玩家错误当成确定好人。 | `role_witch` 精确管理双药；进入高概率放逐位时在投票前声明身份、药物和可公开夜间信息，并明确刀口不是金水。 |
+| 猎人 | 01 在共识票中被误放逐，又依据不充分的关系判断开枪带走平民 15，使好人一次损失两人。 | `role_hunter` 强调开枪前重新评估共识裹挟；没有足够独立证据时，不开枪优于误伤高概率好人。 |
+| 规则与运行 | 初始测试暴露了“所有夜死都有遗言”的规则歧义，修复后从污染点回滚；另一次 API 超时产生了泛化后备发言，因可能影响票型而回滚重赛。 | 遗言按死亡时机/原因显式配置；正式案例只采用零控制器失败的有效重赛结果。 |
+
+这些经验不是只写在文档中：下一局创建 `PlayerState` 时，规则引擎会自动把全局技能和对应身份技能加入该玩家的独立提示上下文。
+
+## 记忆文件
+
+默认在 `game_memories/` 下为每个玩家生成一个文件，包含：
+
+- 该玩家的最终身份和技能；
+- 只属于该玩家的权限裁剪后事件；
+- 该玩家每次行动保存的私密 `thought` / `note`。
+
+这些文件在游戏结束后包含敏感的完整个人视角。分享前请按玩家分别处理。使用 `werewolf play --no-memory` 或将 `memory_directory` 设为 `null` 可以关闭导出。
+
+## 开发与测试
+
+```bash
+python -m pip install -e '.[test]'
+pytest
+ruff check .
+```
+
+测试不访问网络；LLM 请求通过注入的假 transport 验证。

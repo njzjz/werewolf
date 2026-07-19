@@ -6,9 +6,9 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "python-template"  # Please revise this line.
+name = "llm-werewolf"
 dynamic = ["version"]
-description = "A Python template."  # Please revise this line.
+description = "A terminal-first Werewolf game for humans and OpenAI-compatible LLM agents."
 authors = [
     { name = "Jinzhe Zeng", email = "jinzhe.zeng@ustc.edu.cn"},
 ]
@@ -28,12 +28,16 @@ dependencies = [
 requires-python = ">=3.9"
 readme = "README.md"
 keywords = [
+    "werewolf",
+    "llm",
+    "terminal-game",
 ]
 
 [project.scripts]
+werewolf = "werewolf.cli:main"
 
 [project.urls]
-repository = "https://github.com/njzjz/python-template"  # Please revise this line.
+repository = "https://github.com/njzjz/werewolf"
 
 [project.optional-dependencies]
 test = [
@@ -42,10 +46,10 @@ test = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["python_template*"]  # Please revise this line.
+include = ["werewolf*"]
 
 [tool.setuptools_scm]
-version_file = "python_template/_version.py"  # Please revise this line.
+version_file = "werewolf/_version.py"
 
 [tool.ruff.lint]
 select = [
@@ -61,10 +65,11 @@ ignore = [
     "N803",
     "FA100",
     "S603",
-    "ANN101",
-    "ANN102",
     "C901",
+    "COM812", # Ruff formatter owns trailing-comma layout.
     "E501",
+    "RUF001", # Chinese terminal copy intentionally uses full-width punctuation.
+    "T201", # This application is intentionally terminal-first.
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -84,4 +89,4 @@ required-imports = [
 ]
 
 [tool.coverage.report]
-include = ["python_template/*"]  # Please revise this line.
+include = ["werewolf/*"]
