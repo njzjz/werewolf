@@ -1,28 +1,18 @@
 # LLM 狼人杀
 
-一款纯终端运行的狼人杀游戏。玩家可以是真人、OpenAI-compatible LLM，或用于离线演示的本地机器人；法官和规则判定全部由 Python 程序负责，不调用 LLM。
-
-## 功能
-
-- 完整昼夜循环：狼人夜聊与袭击、各身份夜间能力、公开讨论、投票、平票辩解与重投、连锁死亡和胜负判定。
-- 支持电影《人狼游戏》系列牌组与身份：灵媒师、守卫、狂人、妖狐、丘比特/恋人和共有者。
-- 真人与 LLM 可以混坐；不同 LLM 玩家可以使用不同的 API、模型、人物设定和技能。
-- 每名玩家拥有独立的可见事件、私密策略笔记（心路历程）和技能提示，游戏结束后可分别导出 JSON 记忆。
-- 信息按收件人投递。公开、单人私密、狼人频道、恋人频道四种消息在进入玩家上下文之前就已经完成权限裁剪。
-- 默认中文法官和中文 LLM 提示；配置采用 `language` 字段，目前内置 `zh-CN` 和 `en`，便于继续扩展语言目录。
-- 运行时零第三方依赖，OpenAI-compatible API 使用 Python 标准库访问。
+纯终端运行的狼人杀游戏。真人、OpenAI-compatible LLM 和离线本地机器人可以混坐；法官、行动合法性、消息权限、死亡结算与胜负判断全部由 Python 程序确定性执行，不依赖 LLM。
 
 ## 快速开始
 
-项目要求 Python 3.9 或更高版本。
+要求 Python 3.9 或更高版本。
 
 ```bash
 python -m pip install -e .
 
-# 不需要 API，先看一局 8 人本地机器人演示
+# 无需 API：8 人离线演示
 werewolf demo --players 8 --seed 7
 
-# 自动按《人狼游戏 LOVERS》的 11 人牌组运行
+# 无需 API：电影 LOVERS 牌组
 werewolf demo --preset movie_lovers --seed 7
 
 # 生成“1 真人 + 7 LLM”配置
@@ -31,104 +21,73 @@ export OPENAI_API_KEY='你的密钥'
 werewolf play --config werewolf.json
 ```
 
-也可以不安装，直接运行：
+也可以不安装，直接使用 `python -m werewolf demo|init|play`。
 
-```bash
-python -m werewolf demo
-python -m werewolf init
-python -m werewolf play --config werewolf.json
-```
+## 核心能力
 
-多人真人共用一个终端时，保持默认的 `clear_screen: true`。程序会在私密回合之间清屏并要求交接终端，以减少旁观泄密。终端回滚缓冲仍由操作系统和终端软件控制，因此正式线下局建议每名真人使用独立进程/设备，或确保其他玩家不查看回滚内容。
+- 完整昼夜循环：狼人私聊与袭击、身份能力、公开讨论、投票、平票辩解、重投、遗言、连锁死亡和终局结算。
+- 真人与 LLM 混坐；每个 LLM 可配置独立 API、模型、persona 和行为技能。
+- 每名玩家拥有独立的可见历史、私密心路历程和身份技能，不共享完整上下文。
+- 公开、单人私密、狼人频道、恋人频道在进入控制器前完成权限裁剪。
+- 支持 SSE 流式接收、严格纯 LLM 模式、逐调用恢复点、公开观战日志和 Prompt Caching 优化。
+- 默认中文法官与中文 LLM，保留 `zh-CN`/`en` 语言切换设计。
+- 运行时零第三方依赖，API 客户端使用 Python 标准库。
 
-Unix/Linux/macOS 下真人输入会自动启用系统 `readline`/`libedit`：左右方向键可以移动光标，退格键会按 Unicode 字符删除中文，而不是破坏 UTF-8 字节。若运行环境没有提供 readline，程序会回退到 Python 的基础输入行为。
+## 游戏模式
 
-## 配置
+| 预设 | 人数与身份组成 |
+| --- | --- |
+| `classic` | 6–16 人；狼人、平民、预言家、女巫，7 人以上加入猎人 |
+| `movie_basic` | 10 人：狼人×2、村民×6、预言家、守卫 |
+| `movie_crazy_fox` | 12 人：狼人×3、村民×5、预言家、灵媒师、守卫、妖狐 |
+| `movie_prison_break` | 12 人：狼人×3、村民×3、预言家、灵媒师、守卫、共有者×2、狂人 |
+| `movie_lovers` | 11 人：狼人×2、村民×5、预言家、灵媒师、守卫、丘比特 |
+| `movie_mad_land` | 10 人：狼人、狂人×7、预言家、守卫 |
 
-`werewolf init` 会生成完整 JSON。核心结构如下：
+经典模式沿用普通桌游阵营胜利；电影模式要求“结算阵营获胜 + 玩家本人仍存活”，固定奖金池由全部存活赢家平分。妖狐和恋人可以覆盖基础阵营结算。
+
+完整规则、遗言、随机座位、电影身份与胜利优先级见 [规则、身份与牌组](docs/rules.md)。
+
+## 配置与运行
+
+`werewolf init` 会生成完整 JSON。最常用的 provider 配置如下：
 
 ```json
 {
-  "language": "zh-CN",
-  "seed": null,
-  "clear_screen": true,
-  "memory_directory": "game_memories",
-  "context_char_limit": 24000,
-  "role_preset": "classic",
-  "spectator_progress": false,
-  "strict_controllers": false,
-  "controller_retries": 0,
-  "public_transcript_path": null,
-  "checkpoint_path": null,
-  "providers": {
-    "default": {
-      "base_url": "https://api.openai.com/v1",
-      "api_key_env": "OPENAI_API_KEY",
-      "model": "gpt-4.1-mini",
-      "temperature": 0.7,
-      "timeout": 120,
-      "max_tokens": 700,
-      "use_json_mode": true,
-      "wire_api": "chat",
-      "stream": true
-    },
-    "local": {
-      "base_url": "http://127.0.0.1:8000/v1",
-      "api_key": "local-placeholder",
-      "model": "your-local-model",
-      "use_json_mode": false,
-      "wire_api": "responses",
-      "reasoning_effort": "low",
-      "prompt_cache": true,
-      "prompt_cache_retention": "24h",
-      "force_ipv4": false
-    }
-  },
-  "players": [
-    {
-      "name": "小明",
-      "controller": "human",
-      "persona": "谨慎的逻辑流玩家",
-      "skills": ["logic", "social", "memory"]
-    },
-    {
-      "name": "阿狼",
-      "controller": "llm",
-      "provider": "default",
-      "persona": "发言简洁，擅长观察站边关系",
-      "skills": ["logic", "social", "deception", "memory"]
-    }
-  ]
+  "base_url": "https://api.openai.com/v1",
+  "api_key_env": "OPENAI_API_KEY",
+  "model": "your-model-id",
+  "wire_api": "responses",
+  "reasoning_effort": "low",
+  "use_json_mode": false,
+  "stream": true,
+  "timeout": 300,
+  "max_tokens": 500,
+  "prompt_cache": false
 }
 ```
 
-玩家控制器：
+推荐通过 `api_key_env` 注入密钥。兼容服务支持 SSE 时开启 `stream`；正式纯 LLM 对局同时开启 `strict_controllers`、重试、公开日志和私密恢复点：
 
-- `human`：从当前终端读取发言、选择和私密策略笔记。
-- `llm`：调用玩家所指定的 provider；每次只发送该玩家的独立视图。
-- `bot`：不访问网络的简单本地机器人，适合演示和调试，不是 LLM。
+```bash
+werewolf play --config movie.json --spectator --strict-controllers \
+  --controller-retries 2 \
+  --transcript game_runs/movie_public.log \
+  --checkpoint game_runs/movie_private.checkpoint.json
 
-同一局可以配置多个 provider，从而混用 OpenAI、代理服务或本地 OpenAI-compatible 服务。`wire_api` 支持传统的 `chat`（`/chat/completions`）和 Codex 常用的 `responses`（`/responses`）。推荐通过 `api_key_env` 读取密钥，避免把真实密钥写进配置文件。若兼容服务不支持 JSON mode，将 `use_json_mode` 设为 `false`；模型仍会被提示返回 JSON。若域名同时提供 IPv4/IPv6、但当前环境无法连接 IPv6，可设置 `force_ipv4: true`，客户端仍会保留正常的 TLS 主机名验证。
+tail -f game_runs/movie_public.log
+```
 
-兼容服务支持 SSE 时建议设置 `stream: true`。客户端会持续接收 Responses 或 Chat 的文本增量并在本地组装完整 JSON，可降低长时间 `xhigh` 推理经过代理时发生 524 的概率。增量中的私密思考、狼聊和技能选择不会直接打印到公开观战日志；只有完整响应通过 JSON 与合法性校验后才进入游戏状态。
+恢复中止对局：
 
-Responses provider 可设置 `prompt_cache: true` 来提高 OpenAI Prompt Caching 的命中率。客户端会把每名玩家稳定的 system 前缀散列成不含明文身份信息的独立 `prompt_cache_key`，不会让不同私密上下文共用缓存键；`prompt_cache_retention` 可选 `in-memory` 或 `24h`，具体支持范围取决于模型和兼容服务。未开启时不会发送这些扩展字段，因此不支持它们的代理或本地服务仍可正常使用；如果上游本身提供自动前缀缓存，下面的提示词重排仍然可以直接提高命中率。
+```bash
+werewolf play --config movie.json \
+  --resume game_runs/movie_private.checkpoint.json
+```
 
-提示词也按缓存友好的顺序组织：稳定规则、身份和 skill 在最前，持续增长的个人可见历史居中，天数、存活名单、合法选项和本次法官请求放在最后。历史超过 `context_char_limit` 后按稳定区块裁剪，而不是每轮移动一个字符。游戏结束时，如果 provider 返回了 `usage`，终端会汇总输入 token、缓存命中 token、命中率和输出 token；恢复后的统计仅代表当前进程。参见 [OpenAI Prompt Caching 文档](https://developers.openai.com/api/docs/guides/prompt-caching)。
+每次控制器成功返回后都会写入动作日志。恢复时只重新请求第一个未完成动作，已完成的公开发言、投票和私密响应由恢复日志重放。
 
-玩家技能分为三层，并在开局分配身份后自动合并：
-
-1. 所有玩家自动加载 `global_gamecraft`，用于证据分级、反共识裹挟、票型一致性和平票更新。
-2. 根据真实身份自动加载且只加载一个身份技能：`role_villager`、`role_werewolf`、`role_seer`、`role_witch`、`role_hunter`、`role_medium`、`role_bodyguard`、`role_madman`、`role_fox`、`role_cupid` 或 `role_shared`。被丘比特选中的玩家还会追加 `subrole_lover`。
-3. 电影预设中的所有玩家额外加载 `global_movie_survival`，明确“阵营达成终局 + 本人存活”的个人胜利条件和奖金动机。
-4. 最后追加配置文件中的个性技能：
-
-- `logic`：追踪发言、投票和矛盾。
-- `social`：观察站边和关系变化。
-- `deception`：在不越过可见信息边界的前提下进行身份伪装。
-- `memory`：回顾个人历史并持续更新策略笔记。
-
-身份技能仅进入对应玩家的系统提示，不会泄露给其他座位。技能是行为指导，与法官实际执行的角色能力相互独立；预言家查验、女巫用药、猎人开枪等动作仍由规则引擎验证，LLM 不能自行宣称已经执行非法动作。
+Provider 字段、Prompt Caching、真人终端、观战、恢复点和记忆导出见 [配置与运行](docs/configuration.md)。
 
 ## 信息隔离
 
@@ -142,172 +101,67 @@ Responses provider 可设置 `prompt_cache: true` 来提高 OpenAI Prompt Cachin
                                            真人界面或单个 LLM 请求
 ```
 
-规则引擎持有唯一的真实角色表。控制器收到的是不可变 `PlayerView`，其中只有：
+规则引擎持有唯一真实角色表。控制器只能收到不可变 `PlayerView`：自己的身份、公开存亡名单、已经投递给自己的事件、自己的策略笔记与技能。全局审计记录不会交给 LLM 后再靠提示词要求其“不要看”；越权信息在构造请求前就不存在。
 
-- 自己的身份与角色说明；
-- 存活/死亡玩家姓名（不含隐藏身份）；
-- 已经投递给自己的公开、私密、狼队或恋人事件；
-- 自己的策略笔记和技能。
+公开日志可以分享；恢复点和 `game_memories/` 含身份、私聊、个人心路及响应记录，必须保持私密。
 
-全局审计记录不会直接交给 LLM，再依赖提示词要求它“不要看”；权限裁剪发生在构造 LLM 请求之前。测试套件也会验证私密、狼人和恋人消息没有进入无权玩家的记忆。
+## 已完成的全 LLM 对局
 
-### LLM 观战进度流
+以下只收录具有明确终局公告、未使用本地 bot 回退、且没有真人参与的有效时间线。公开记录已经移除技术心跳，不包含狼聊、恋人私聊、夜间目标、API 凭据或个人心路。
 
-长推理模型在夜间连续执行私密动作时，公开频道可能长时间没有游戏事件。设置 `spectator_progress: true` 或使用 `werewolf play --spectator` 后，终端会立即输出安全的行动状态。LLM 推理期间只使用同一行显示当前推理强度和已持续秒数，完成后自动清除，不再反复刷出心跳行，也不会把每秒状态写进公开日志。公开发言仍会在生成完成后立刻逐人显示；夜间状态统一写成“私密行动”，不会泄露具体身份、目标、狼聊或心路历程。
+| 牌组 | 结果 | 关键过程 | 完整公开记录 |
+| --- | --- | --- | --- |
+| 经典 16 人 | 狼人第 4 天获胜；4 狼存活 | 女巫、预言家、猎人连续出局；好人只在第 3 天平票重投抓到一狼 | [记录](examples/case_studies/16_llm_2026-07-20_public_transcript.txt) |
+| CRAZY FOX | 好人第 4 天获胜；7 名好人存活分奖 | 首日平票重投出狼；预言家连续查出两狼；妖狐第 3 天被放逐 | [记录](examples/case_studies/movie_crazy_fox_20260721_public_transcript.txt) |
+| LOVERS | 狼人第 5 天获胜；R08 独享奖金 | 首日出狼；丘比特 R07 与预言家 R02 是恋人，第 2 天放逐与殉情同时失去；最后一狼存活 | [记录](examples/case_studies/movie_lovers_20260723_public_transcript.txt) |
+| MAD LAND | 狼人第 4 天获胜；狼人 R08 与狂人 R07 分奖 | 三名预言家声明互斥；真预言家 R09 首日出局；假跳狂人存活并持续制造错误查验世界 | [记录](examples/case_studies/movie_mad_land_20260724_public_transcript.txt) |
+| PRISON BREAK | 好人第 5 天获胜；平民 R02、共有者 R07 分奖 | 信息角色连续夜死；共有者错峰互证保留可信链；三狼在第 3–5 天依次被放逐 | [记录](examples/case_studies/movie_prison_break_20260722_public_transcript.txt) |
 
-正式的 100% LLM 对局建议同时设置 `strict_controllers: true`，或使用：
+未纳入：`movie_basic_20260720` 没有完成且无恢复点；各电影板第一次技术中止记录不是有效终局；真人参与的 LOVERS 对局按要求排除。
 
-```bash
-werewolf play --config movie.json --spectator --strict-controllers \
-  --controller-retries 2 --transcript game_runs/movie_public.log \
-  --checkpoint game_runs/movie_private.checkpoint.json
-```
+## 跨局复盘与技能蒸馏
 
-严格模式下，API 失败、无效 JSON 或非法选择会直接终止本局，不会悄悄替换成本地 bot，因此“全部玩家都是 LLM”可以被实际保证。
+这些结论已经写入 `werewolf/skills.py`，开局时由法官按真实身份和牌组自动注入对应玩家的私密系统提示。
 
-`controller_retries` 或 `--controller-retries` 可在严格终止前重试同一个 LLM 动作。重试仍调用原 LLM，不会使用本地 bot；观战日志会显示重试次数，但不会暴露执行私密动作的玩家身份。
-
-`checkpoint_path` 或 `--checkpoint` 会在开局、完整夜晚、完整白天以及每一次控制器成功返回后原子保存恢复数据。阶段内的每个响应都会进入动作日志；恢复时先回滚到阶段起点，再自动重放已经完成的响应，只重新请求第一个未完成动作，因此狼人票、公开票和平票聚合不会丢失或重复调用。
-
-```bash
-werewolf play --config movie.json \
-  --resume game_runs/movie_private.checkpoint.json
-```
-
-恢复点包含身份、恋人关系、个人私密记忆、心路历程和已完成的控制器响应，文件权限会设置为仅当前用户可读写。它不能作为公开观战日志分享。恢复必须使用相同语言、电影预设、玩家顺序和控制器配置；公开日志会自动截断到恢复点对应位置，再重放本阶段的已完成公开事件。
-
-`public_transcript_path` 或 `--transcript` 会把法官公告、公开发言、公开投票、合法遗言和安全观战进度实时追加到 UTF-8 文件。文件不包含角色私密信息、查验目标、守护目标、狼聊、恋人聊天或个人心路。另开终端即可实时查看：
-
-```bash
-tail -f game_runs/movie_public.log
-```
-
-## 电影《人狼游戏》系列身份与牌组
-
-`role_preset` 可选择以下电影牌组。`werewolf demo --preset ...` 未传 `--players` 时会自动采用正确人数；JSON 配置则必须提供完全相同数量的玩家。
-
-电影模式模拟影片中的现实后果：游戏内死亡等同于现实死亡。因此，阵营达成终局条件只负责结束游戏；一名玩家必须同时属于结算阵营并且仍然存活，才会列入最终获胜玩家。程序把奖金抽象成固定的 100% 奖金池，由全部存活获胜者平均分配，不绑定具体金额或币种；存活赢家越少，每人份额越高。
-
-| 预设 | 对应规则板 | 人数与身份组成 |
+| 对象 | 完整对局暴露的问题 | 新的策略约束 |
 | --- | --- | --- |
-| `movie_basic` | 电影系列基础板 | 10 人：狼人×2、村民×6、预言家、守卫 |
-| `movie_crazy_fox` | 《人狼游戏 CRAZY FOX》 | 12 人：狼人×3、村民×5、预言家、灵媒师、守卫、妖狐 |
-| `movie_prison_break` | 《人狼游戏 PRISON BREAK》 | 12 人：狼人×3、村民×3、预言家、灵媒师、守卫、共有者×2、狂人 |
-| `movie_lovers` | 《人狼游戏 LOVERS》 | 11 人：狼人×2、村民×5、预言家、灵媒师、守卫、丘比特 |
-| `movie_mad_land` | 《人狼游戏 MAD LAND》 | 10 人：狼人、狂人×7、预言家、守卫 |
+| 全体玩家 | 多数票、发言完整、刀口和重复疑点经常被错误当成身份确认 | 区分法官事实、个人自知、他人声明和行为推断；私密自知不能直接完成公开自证 |
+| 平民 | 被假查杀时只反复声称“我是平民”，对其他人缺少可验证增量 | 用自己的底牌排除个人分支，再用公开时间线、票型和关系链说服全场 |
+| 狼人 | 连续多轮同步救队友会形成稳定关系链；狂人误查杀真狼时容易全队暴露 | 夜间提前规划切割与救援边界，避免相同措辞、机械同票和连续共同保狼 |
+| 预言家 | 有的局起跳过晚导致信息断链；MAD LAND 又在只有低价值村人结果时过早暴露 | 查杀、受压或能阻止关键误投时及时跳；少数村人板的低区分度村人结果优先隐藏 |
+| 灵媒师 | 有效验尸结果若拖到夜死或遗言会永久丢失 | 首个有价值结果出现后评估夜死风险，公开完整结果表与狼人数量约束 |
+| 守卫 | 过早公开会替狼人缩小刀口；无成功守护的迟跳记录很难验证 | 静默保护高价值信息链；只在受压、有效对跳或记录能改变当前票型时公开 |
+| 狂人 | 不知道狼人，假查杀可能误中真狼；假跳者也常被错误直接当狼 | 优先制造可回旋的错误信息，避免锁死高嫌疑真狼；假跳不等于唯一狼人 |
+| 妖狐 | 长期依附单一信息链，狼人减少后容易成为数量约束中的异常位置 | 在两阵营之间动态平衡，避免成为共识查验位或唯一剩余解释 |
+| 丘比特/恋人 | 丘比特自连高曝光预言家，搭档被放逐后两人同时死亡 | 选择恋人时计算共同暴露风险；恋人不要用机械互保和同步票型暴露关系 |
+| 共有者 | 过早双跳会同时暴露，完全隐藏又浪费唯一互证信息 | 一人受压或遗言先报、另一人次日准确确认；身份互证不等于判断全部正确 |
+| 女巫/猎人 | 经典局中女巫被放逐前未报药，猎人跟随共识误枪平民 | 高概率放逐前公开关键资源；开枪证据不足时，不开枪优于制造第二名好人死亡 |
 
-新增身份由 Python 法官确定性执行：
+### 为什么 MAD LAND 的村人阵营还敢跳身份？
 
-- `灵媒师`：每晚得知前一天被投票放逐者显示为狼人侧还是村人侧。狂人、妖狐、丘比特等非狼人均显示为村人侧。
-- `守卫`：每晚保护一名其他存活玩家，阻止当晚狼袭；不能保护自己。保护成功只公开为平安夜，不向任何玩家泄露具体原因。
-- `狂人`：不知道狼人名单、不进入狼聊、没有夜间能力，查验与灵媒结果均显示为村人侧；狼人达成胜利且狂人本人仍存活时，狂人才属于获胜玩家。胜负所需的“存活狼人数”只计算真正的狼人。
-- `共有者`：固定为两人，开局仅两名共有者互相得知身份，其他玩家不会收到这项信息。
-- `妖狐`：免疫狼人袭击，被预言家查验时当夜死亡。如果村人或狼人已满足基础胜利条件而妖狐仍存活，妖狐取代基础阵营独自获胜。
-- `丘比特/恋人`：丘比特开局指定两名不同玩家，允许选择自己。两人保留原身份和能力，额外成为恋人，并拥有独立私聊；一人死亡，另一人立即殉情。如果基础阵营满足胜利条件时两名恋人均存活，则触发恋人阵营的独占结算。恋人因条件要求必然存活；丘比特只有自己也存活时才属于获胜玩家并参与分奖。
+更合理的默认均衡确实是“全员都可以跳狂人”：真狂人如实声明，狼人混入，预言家和守卫也用狂人身份作掩护。因为所有角色都能这样说，狂人声明本身接近零信息，并不是免票证明；玩家仍然可以投他，只是不能根据这句声明判断身份。
 
-妖狐和丘比特都是会取代基础阵营结果的第三方机制。内置电影牌组不会同时出现两者；自定义固定身份也禁止混用，以免产生未经影片定义的胜利优先级。终局公告和 `GameResult.prize_shares` 会列出每名存活赢家获得的归一化奖金份额。可直接运行以下真人参与案例：
+再看实战：首夜遗言跳预言家的 R06 和白天跳预言家的 R07 都是狂人，他们主动假跳信息角色是在替狼人阵营制造混乱；实际狼人 R08 没有进入预言家对跳中心，而是混在普通声明中隐藏。真正属于村人阵营并公开身份的只有预言家 R09，守卫 R01 始终没有起跳。R09 当时只有一张 R05“村人侧”结果，这个起跳决定并不理想：
 
-```bash
-werewolf play --config examples/movie_lovers.json
-werewolf play --config examples/movie_crazy_fox.json
-werewolf play --config examples/movie_mad_land.json
-```
+- 牌组只有一狼，七名狂人都会显示村人侧，因此这张结果只排除一个狼人候选，不能找到真正盟友。
+- 村人阵营只有预言家和守卫；公开身份会同时告诉狼人和七名狂人应该集中攻击谁。
+- 两名假预言家更可能是狂人而非唯一狼人，揭穿假跳并不能直接推进放逐狼人。
+- R09 没有查杀，也没有处在必须靠身份自救的明确放逐位，公开收益不足以覆盖暴露成本。
 
-## 经典规则
+实际结果正是 R09 当天被放逐，守卫 R01 保持隐藏却在第二夜被狼人击杀。更专业的策略是：预言家和守卫先留在狂人声明池中；预言家只有村人侧结果时继续隐藏并寻找唯一狼人，拿到查杀、即将被放逐，或必须阻止关键村人被假查杀时再脱离掩护。狂人可以承担高风险假跳，狼人通常继续混在狂人声明池里。该牌组现在会额外加载 `board_movie_mad_land` skill。
 
-`classic` 是无警长的经典简化规则，支持 6–16 人：
+## 技能加载层次
 
-经典模式保持普通桌游语义：阵营获胜时，同阵营已死亡玩家仍视为获胜，且不计算电影奖金份额。
+每名玩家开局自动获得：
 
-- 6–8 人为 2 狼，9–11 人为 3 狼，12–14 人为 4 狼，15–16 人为 5 狼。
-- 固定包含预言家和女巫；7 人及以上加入猎人，其余为平民。
-- 狼人每夜先在私密频道交流，再分别投票；最高票目标被袭击，平票由法官的种子随机数裁决。
-- 预言家每夜查验一名其他存活玩家，只得知阵营。
-- 女巫有一瓶解药和一瓶毒药，每瓶整局限用一次；默认同夜不能同时使用。猎人被毒死不能开枪。
-- 白天依次公开发言和投票。最高票平局时，平票玩家辩解后重投；再次平票则无人出局。
-- 默认死亡不翻牌、允许遗言、禁止自投。狼人全部死亡则好人胜；存活狼人数大于等于存活好人数则狼人胜。
+1. `global_gamecraft`：证据分级、反方解释、投票一致性和公开/私密信息边界。
+2. 一个真实身份技能，例如 `role_seer`、`role_madman` 或 `role_shared`。
+3. 配置中的 `logic`、`social`、`deception`、`memory`。
+4. 电影局的 `global_movie_survival`。
+5. 适用的牌组技能；MAD LAND 为 `board_movie_mad_land`。
+6. 恋人玩家在配对完成后追加 `subrole_lover`。
 
-可通过 `rules` 修改以下规则：
-
-```json
-{
-  "max_days": 20,
-  "wolf_chat_rounds": 1,
-  "witch_can_self_save": true,
-  "witch_can_use_two_potions_same_night": false,
-  "reveal_roles_on_death": false,
-  "allow_self_vote": false,
-  "last_words": true,
-  "first_night_last_words": true,
-  "night_death_last_words": false,
-  "day_vote_last_words": true,
-  "hunter_shot_last_words": false,
-  "randomize_discussion_start": true,
-  "randomize_seating": true
-}
-```
-
-默认遗言规则为：首夜死亡和白天放逐可遗言，第二夜起的夜间死亡以及被猎人带走者无遗言。`last_words: false` 可整体关闭遗言，其余字段可用于桌规调整。
-
-默认每天由法官从存活玩家中随机选择一个发言起点，再按座位环形顺序进行，不会固定从 1 号位开始。设置 `randomize_discussion_start: false` 可恢复固定座位顺序。
-
-默认开局会先打乱玩家座位，再分配 `p1`、`p2` 等内部座位号和身份。因此配置文件中把真人写在第一个仅代表名单顺序，不代表真人永远坐 1 号位。设置 `randomize_seating: false` 可用于固定座位测试；恢复游戏时始终沿用恢复点中的实际座位顺序，不会再次洗座。
-
-`seed` 只控制身份洗牌、平票裁决和本地机器人动作；真实 LLM 的输出仍可能不确定。配置中的 `fixed_role` 仅用于可复现测试或主持人预设，并且必须给所有玩家同时设置。正常游戏不要使用它，因为能读取配置的人会看到身份。
-
-## 16 个 LLM 实战案例
-
-2026-07-20 使用 16 个相互隔离的 LLM 玩家完成了一局实际 API 对局。模型通过 OpenAI-compatible Responses API 接入，推理强度为 `low`；密钥仅从环境变量读取，没有写入配置、日志或记忆文件。身份配置为 5 狼、预言家、女巫、猎人和 8 平民，采用本 README 所述的标准遗言规则。
-
-可从 [16 LLM Responses 示例配置](examples/16_llm_responses.json) 开始复现：
-
-```bash
-# 先把示例中的 base_url 和 model 改为实际服务
-export OPENAI_API_KEY='你的密钥'
-werewolf play --config examples/16_llm_responses.json
-```
-
-案例的[最终有效公开频道完整记录](examples/case_studies/16_llm_2026-07-20_public_transcript.txt)也保存在仓库中。该记录只包含法官公告、公开发言、公开投票、合法遗言和终局身份；狼人夜聊、角色私密信息、个人心路历程及 API 信息均未上传。
-
-### 有效对局时间线
-
-| 阶段 | 事件 | 规则与局势影响 |
-| --- | --- | --- |
-| 第 1 夜 | 狼人袭击 16，女巫 11 使用解药 | 平安夜；刀口只能提高 16 的好人概率，不等于查验金水 |
-| 第 1 天 | 几乎全场放逐女巫 11 | 11 在合法的白天遗言中公开身份、解药和刀口，但信息已无法阻止本轮误投 |
-| 第 2 夜 | 狼人击杀预言家 13 | 第二夜起夜死无遗言；13 的第二夜查验不会泄露 |
-| 第 2 天 | 全场放逐猎人 01，01 开枪带走平民 15 | 01 有白天遗言；15 属于猎人击杀，默认无遗言；好人连续损失两人 |
-| 第 3 夜 | 狼人击杀预言家首夜金水 08 | 狼队继续清理高可信好人 |
-| 第 3 天 | 狼人 02 与平民 06 平票，重投后 02 出局 | 好人通过比较平票新增解释，成功找出一狼 |
-| 第 4 夜 | 狼人击杀首夜刀口 16 | 形成 4 狼对 5 好人的生死轮 |
-| 第 4 天 | 除 10 外全员放逐平民 10 | 达到 4 狼对 4 好人，狼人阵营获胜 |
-
-最终存活狼人为 03、05、07、12。有效对局中 16/16 玩家都保存了独立心路历程，控制器失败 0 次、非法选择 0 次、狼队信息泄漏 0 次、消息收件人违规 0 次。
-
-### 复盘与经验蒸馏
-
-| 对象 | 案例教训 | 已蒸馏技能 |
-| --- | --- | --- |
-| 全体玩家 | 第 1、2、4 天多次出现近乎全票。LLM 容易把“多人重复同一疑点”误当成新增证据，也会把解释不完整过度升级成身份结论。平票轮之所以抓到 02，正是因为重新比较了新增解释。 | `global_gamecraft` 强制证据分级、独立嫌疑排序、反方解释、投票变更理由和平票后重新评估。 |
-| 平民 | 好人多次跟随共识放逐神职或平民；夜间刀口、被多人怀疑、发言长短都被赋予过高身份权重。 | `role_villager` 要求投票前给出首选/备选，检查是否只在跟随多数，不伪造能力，不把刀口或票数当身份确认。 |
-| 狼人 | 狼队成功隐藏在连续共识票中，优先击杀预言家、金水和刀口；但 02 在平票辩解中的证据比较落败。队友过度同调也可能形成可追踪关系链。 | `role_werewolf` 指导夜间确定袭击与白天站位，避免相同措辞和机械统一票型，并根据公开证据选择保护、切割或拉开距离。 |
-| 预言家 | 13 首日及时公开 08 金水是正确的信息保全；第二夜死亡后按规则不能再公布新查验，因此不能依赖死后补信息。 | `role_seer` 维护真实查验表，起跳时公布历次结果和后续查验方向，禁止包装或伪造结果。 |
-| 女巫 | 11 首夜正确救下 16，但直到被放逐后的遗言才公开身份和药物状态，已经无法改变投票。刀口也被部分玩家错误当成确定好人。 | `role_witch` 精确管理双药；进入高概率放逐位时在投票前声明身份、药物和可公开夜间信息，并明确刀口不是金水。 |
-| 猎人 | 01 在共识票中被误放逐，又依据不充分的关系判断开枪带走平民 15，使好人一次损失两人。 | `role_hunter` 强调开枪前重新评估共识裹挟；没有足够独立证据时，不开枪优于误伤高概率好人。 |
-| 规则与运行 | 初始测试暴露了“所有夜死都有遗言”的规则歧义，修复后从污染点回滚；另一次 API 超时产生了泛化后备发言，因可能影响票型而回滚重赛。 | 遗言按死亡时机/原因显式配置；正式案例只采用零控制器失败的有效重赛结果。 |
-
-这些经验不是只写在文档中：下一局创建 `PlayerState` 时，规则引擎会自动把全局技能和对应身份技能加入该玩家的独立提示上下文。
-
-## 记忆文件
-
-默认在 `game_memories/` 下为每个玩家生成一个文件，包含：
-
-- 该玩家的最终身份和技能；
-- 若该玩家是恋人，仅在其个人文件中记录恋人 ID 与姓名；
-- 只属于该玩家的权限裁剪后事件；
-- 该玩家每次行动保存的私密 `thought` / `note`。
-
-这些文件在游戏结束后包含敏感的完整个人视角。分享前请按玩家分别处理。使用 `werewolf play --no-memory` 或将 `memory_directory` 设为 `null` 可以关闭导出。
+技能只指导决策，不能改变法官规则或赋予额外能力。
 
 ## 开发与测试
 
@@ -315,6 +169,7 @@ werewolf play --config examples/16_llm_responses.json
 python -m pip install -e '.[test]'
 pytest
 ruff check .
+ruff format --check .
 ```
 
-测试不访问网络；LLM 请求通过注入的假 transport 验证。
+测试不访问网络；LLM 请求通过注入假 transport 验证。

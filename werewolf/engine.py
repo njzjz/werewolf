@@ -40,7 +40,12 @@ from .models import (
     Visibility,
     localized,
 )
-from .skills import add_lover_skill, add_movie_survival_skill, resolve_player_skills
+from .skills import (
+    add_lover_skill,
+    add_movie_survival_skill,
+    add_preset_skill,
+    resolve_player_skills,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -201,6 +206,7 @@ class Game:
             skills = resolve_player_skills(role, list(seat.skills))
             if config.role_preset != "classic":
                 skills = add_movie_survival_skill(skills)
+            skills = add_preset_skill(skills, config.role_preset)
             self.players.append(
                 PlayerState(
                     player_id=player_id,
