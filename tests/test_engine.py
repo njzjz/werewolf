@@ -18,7 +18,15 @@ from werewolf.config import (
     load_config,
 )
 from werewolf.engine import DeathCause, Game, role_deck
-from werewolf.models import ActionKind, AgentResponse, Faction, Role, Visibility
+from werewolf.models import (
+    ActionKind,
+    ActionOption,
+    ActionRequest,
+    AgentResponse,
+    Faction,
+    Role,
+    Visibility,
+)
 
 
 class SilentTerminal(Terminal):
@@ -29,6 +37,18 @@ class SilentTerminal(Terminal):
 
     def announce(self, text: str) -> None:
         """Discard public output; the boundary still records it."""
+
+
+class CapturingTerminal(SilentTerminal):
+    """Capture spectator progress for privacy-focused assertions."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.progress_events: list[str] = []
+
+    def progress(self, text: str) -> None:
+        """Record progress without writing test output."""
+        self.progress_events.append(text)
 
 
 class ScriptedController:
@@ -59,6 +79,15 @@ class ScriptedController:
         return AgentResponse(
             choice=request.options[0].value if request.options else None,
         )
+
+
+class FailingController:
+    """Controller used to verify fail-fast all-LLM simulations."""
+
+    def act(self, _view, _request):
+        """Raise instead of returning an action."""
+        msg = "simulated provider outage"
+        raise RuntimeError(msg)
 
 
 @pytest.mark.parametrize(
@@ -193,6 +222,63 @@ def test_setup_keeps_roles_private_and_wolf_roster_team_only() -> None:
     assert all(
         "狼人队友名单" not in event.text for event in game.players[2].memory.events
     )
+
+
+def test_spectator_progress_streams_without_revealing_private_actor() -> None:
+    """Progress names public actors but hides identities behind private actions."""
+    terminal = CapturingTerminal()
+    controller = ScriptedController()
+    config = replace(fixed_config(), spectator_progress=True)
+    game = Game(config, controllers={"p1": controller}, terminal=terminal)
+
+    game.phase = "discussion"
+    game._act(  # noqa: SLF001
+        game._by_id["p1"],  # noqa: SLF001
+        ActionRequest(ActionKind.SPEAK, "发言"),
+    )
+    game.phase = "night"
+    game._act(  # noqa: SLF001
+        game._by_id["p1"],  # noqa: SLF001
+        ActionRequest(ActionKind.TEAM_CHAT, "狼聊"),
+    )
+
+    assert terminal.progress_events[0] == "玩家1 正在组织公开发言……"
+    assert terminal.progress_events[1] == "一项夜间私密行动正在处理中……"
+    assert "玩家1" not in terminal.progress_events[1]
+    assert "狼人" not in terminal.progress_events[1]
+
+
+def test_strict_controllers_never_fall_back_to_local_bot() -> None:
+    """A formal all-LLM game must stop on failures or illegal model choices."""
+    config = replace(fixed_config(), strict_controllers=True)
+    failing_game = Game(
+        config,
+        controllers={"p1": FailingController()},
+        terminal=SilentTerminal(),
+    )
+    with pytest.raises(RuntimeError, match="simulated provider outage"):
+        failing_game._act(  # noqa: SLF001
+            failing_game._by_id["p1"],  # noqa: SLF001
+            ActionRequest(ActionKind.SPEAK, "发言"),
+        )
+
+    illegal = ScriptedController(
+        {ActionKind.VOTE: [AgentResponse(choice="not-a-player")]},
+    )
+    illegal_game = Game(
+        config,
+        controllers={"p1": illegal},
+        terminal=SilentTerminal(),
+    )
+    with pytest.raises(RuntimeError, match="illegal choice"):
+        illegal_game._act(  # noqa: SLF001
+            illegal_game._by_id["p1"],  # noqa: SLF001
+            ActionRequest(
+                ActionKind.VOTE,
+                "投票",
+                (ActionOption("p2", "玩家2"),),
+            ),
+        )
 
 
 def test_players_receive_global_and_role_specific_skills() -> None:

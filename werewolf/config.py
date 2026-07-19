@@ -96,6 +96,9 @@ class GameConfig:
     memory_directory: str | None = "game_memories"
     context_char_limit: int = 24000
     role_preset: str = "classic"
+    spectator_progress: bool = False
+    strict_controllers: bool = False
+    public_transcript_path: str | None = None
 
 
 def _provider_from_dict(raw: dict[str, Any]) -> LLMProviderConfig:
@@ -147,6 +150,13 @@ def load_config(path: str | Path) -> GameConfig:
         memory_directory=raw.get("memory_directory", "game_memories"),
         context_char_limit=int(raw.get("context_char_limit", 24000)),
         role_preset=str(raw.get("role_preset", "classic")),
+        spectator_progress=bool(raw.get("spectator_progress", False)),
+        strict_controllers=bool(raw.get("strict_controllers", False)),
+        public_transcript_path=(
+            str(raw["public_transcript_path"])
+            if raw.get("public_transcript_path") is not None
+            else None
+        ),
     )
     validate_config(config)
     return config
@@ -247,6 +257,9 @@ def example_config() -> dict[str, Any]:
         "memory_directory": "game_memories",
         "context_char_limit": 24000,
         "role_preset": "classic",
+        "spectator_progress": False,
+        "strict_controllers": False,
+        "public_transcript_path": None,
         "providers": {
             "default": {
                 "base_url": "https://api.openai.com/v1",

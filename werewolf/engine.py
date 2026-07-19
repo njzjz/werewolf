@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import threading
 from collections import Counter
 from contextlib import suppress
 from dataclasses import asdict, dataclass
@@ -157,7 +158,10 @@ class Game:
         validate_config(config)
         self.config = config
         self.rng = random.Random(config.seed)  # noqa: S311 - game simulation, not security.
-        self.terminal = terminal or Terminal(clear_screen=config.clear_screen)
+        self.terminal = terminal or Terminal(
+            clear_screen=config.clear_screen,
+            transcript_path=config.public_transcript_path,
+        )
         self.day = 0
         self.phase = "setup"
         self._antidote_available = True
@@ -916,11 +920,28 @@ class Game:
         return False
 
     def _act(self, player: PlayerState, request: ActionRequest) -> AgentResponse:
+        heartbeat_stop = threading.Event()
+        heartbeat: threading.Thread | None = None
+        if self.config.spectator_progress:
+            self.terminal.progress(self._spectator_action_text(player, request))
+            if isinstance(player.controller, LLMController):
+                heartbeat = threading.Thread(
+                    target=self._spectator_heartbeat,
+                    args=(heartbeat_stop,),
+                    daemon=True,
+                )
+                heartbeat.start()
         try:
             response = player.controller.act(self._view(player), request)
         except (EOFError, KeyboardInterrupt):
             raise
-        except Exception as exc:  # noqa: BLE001 - external controllers must not crash the judge.
+        except Exception as exc:
+            if self.config.strict_controllers:
+                msg = (
+                    f"Controller failed for {player.name} during {request.kind.value}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                raise RuntimeError(msg) from exc
             self.boundary.private(
                 day=self.day,
                 phase=self.phase,
@@ -931,12 +952,22 @@ class Game:
                 ),
             )
             response = BotController(self.rng).act(self._view(player), request)
+        finally:
+            heartbeat_stop.set()
+            if heartbeat is not None:
+                heartbeat.join(timeout=1)
         legal = {option.value for option in request.options}
         if (
             request.options
             and response.choice not in legal
             and (response.choice is not None or not request.allow_abstain)
         ):
+            if self.config.strict_controllers:
+                msg = (
+                    f"Controller returned an illegal choice for {player.name} "
+                    f"during {request.kind.value}: {response.choice!r}"
+                )
+                raise RuntimeError(msg)
             self.boundary.private(
                 day=self.day,
                 phase=self.phase,
@@ -958,6 +989,52 @@ class Game:
         )
         player.memory.reflect(self.day, self.phase, private_note)
         return response
+
+    def _spectator_heartbeat(self, stop: threading.Event) -> None:
+        """Emit periodic safe liveness signals while one LLM request is pending."""
+        while not stop.wait(12):
+            self.terminal.progress(
+                self._t(
+                    "LLM 仍在进行 xhigh 推理……",
+                    "The LLM is still reasoning at xhigh effort...",
+                ),
+            )
+
+    def _spectator_action_text(
+        self,
+        player: PlayerState,
+        request: ActionRequest,
+    ) -> str:
+        """Describe action progress without revealing role identities or targets."""
+        if request.kind is ActionKind.SPEAK:
+            return self._t(
+                f"{player.name} 正在组织公开发言……",
+                f"{player.name} is preparing a public statement...",
+            )
+        if request.kind is ActionKind.LAST_WORDS:
+            return self._t(
+                f"{player.name} 正在组织遗言……",
+                f"{player.name} is preparing final words...",
+            )
+        if request.kind is ActionKind.VOTE:
+            return self._t(
+                f"{player.name} 正在提交公开投票……",
+                f"{player.name} is submitting a public vote...",
+            )
+        if self.phase == "setup":
+            return self._t(
+                "开局私密能力正在处理中……",
+                "A private setup ability is being resolved...",
+            )
+        if self.phase == "night":
+            return self._t(
+                "一项夜间私密行动正在处理中……",
+                "A private night action is being resolved...",
+            )
+        return self._t(
+            "一项私密结算正在处理中……",
+            "A private resolution is in progress...",
+        )
 
     def _view(self, player: PlayerState) -> PlayerView:
         role_names = localized(ROLE_NAMES, self.config.language)
@@ -998,7 +1075,7 @@ class Game:
             text=rendered,
             sender=player.name,
         )
-        print(f"[{player.name}] {text}", flush=True)
+        self.terminal.say(player.name, text)
 
     def _winner(self) -> Faction | None:
         """Return the winning faction after applying film third-party priority."""

@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from .models import (
@@ -104,8 +105,17 @@ class Controller(Protocol):
 class Terminal:
     """Small terminal adapter that supports pass-and-play privacy."""
 
-    def __init__(self, *, clear_screen: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        clear_screen: bool = True,
+        transcript_path: str | Path | None = None,
+    ) -> None:
         self.clear_screen = clear_screen
+        self.transcript_path = Path(transcript_path) if transcript_path else None
+        if self.transcript_path is not None:
+            self.transcript_path.parent.mkdir(parents=True, exist_ok=True)
+            self.transcript_path.write_text("", encoding="utf-8")
 
     def clear(self) -> None:
         """Clear only interactive terminals; captured logs remain readable."""
@@ -114,7 +124,22 @@ class Terminal:
 
     def announce(self, text: str) -> None:
         """Print a public judge announcement."""
-        print(f"\n[法官] {text}", flush=True)
+        self._emit(f"\n[法官] {text}")
+
+    def progress(self, text: str) -> None:
+        """Print a non-authoritative spectator heartbeat without game secrets."""
+        self._emit(f"[观战] {text}")
+
+    def say(self, player_name: str, text: str) -> None:
+        """Print and persist one completed public player statement."""
+        self._emit(f"[{player_name}] {text}")
+
+    def _emit(self, rendered: str) -> None:
+        """Write a public line to stdout and the optional spectator transcript."""
+        print(rendered, flush=True)
+        if self.transcript_path is not None:
+            with self.transcript_path.open("a", encoding="utf-8") as file:
+                file.write(rendered + "\n")
 
     def private_turn(self, view: PlayerView) -> None:
         """Render only the active human's already-authorized memory."""

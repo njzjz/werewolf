@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from werewolf.agents import LLMController, OpenAICompatibleClient
+from werewolf.agents import LLMController, OpenAICompatibleClient, Terminal
 from werewolf.config import LLMProviderConfig
 from werewolf.models import (
     ActionKind,
@@ -124,3 +124,17 @@ def test_responses_api_payload_and_output_shape() -> None:
     assert captured["reasoning"] == {"effort": "low"}
     assert captured["store"] is False
     assert "messages" not in captured
+
+
+def test_terminal_persists_only_explicit_public_output(tmp_path) -> None:
+    """The spectator transcript should mirror judge, progress, and public speech."""
+    transcript = tmp_path / "public.log"
+    terminal = Terminal(clear_screen=False, transcript_path=transcript)
+
+    terminal.announce("天亮了。")
+    terminal.progress("公开行动处理中……")
+    terminal.say("玩家01", "这是公开发言。")
+
+    assert transcript.read_text(encoding="utf-8") == (
+        "\n[法官] 天亮了。\n[观战] 公开行动处理中……\n[玩家01] 这是公开发言。\n"
+    )

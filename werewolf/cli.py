@@ -35,6 +35,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="结束后不导出个人记忆",
     )
+    play_parser.add_argument(
+        "--spectator",
+        action="store_true",
+        help="实时显示不泄密的 LLM 行动与推理进度",
+    )
+    play_parser.add_argument(
+        "--strict-controllers",
+        action="store_true",
+        help="控制器失败或非法选择时终止，不使用本地机器人后备",
+    )
+    play_parser.add_argument(
+        "--transcript",
+        help="将公开观战频道实时写入指定 UTF-8 文件",
+    )
 
     demo_parser = subparsers.add_parser("demo", help="运行无需 API 的本地机器人演示")
     demo_parser.add_argument("--players", type=int, choices=range(6, 17))
@@ -67,6 +81,12 @@ def main(argv: list[str] | None = None) -> None:
                 config = replace(config, clear_screen=False)
             if args.no_memory:
                 config = replace(config, memory_directory=None)
+            if args.spectator:
+                config = replace(config, spectator_progress=True)
+            if args.strict_controllers:
+                config = replace(config, strict_controllers=True)
+            if args.transcript:
+                config = replace(config, public_transcript_path=args.transcript)
         result = Game(config).run()
         winner = result.winner.value if result.winner else "draw"
         print(

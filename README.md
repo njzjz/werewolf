@@ -53,6 +53,9 @@ python -m werewolf play --config werewolf.json
   "memory_directory": "game_memories",
   "context_char_limit": 24000,
   "role_preset": "classic",
+  "spectator_progress": false,
+  "strict_controllers": false,
+  "public_transcript_path": null,
   "providers": {
     "default": {
       "base_url": "https://api.openai.com/v1",
@@ -134,6 +137,25 @@ python -m werewolf play --config werewolf.json
 - 自己的策略笔记和技能。
 
 全局审计记录不会直接交给 LLM，再依赖提示词要求它“不要看”；权限裁剪发生在构造 LLM 请求之前。测试套件也会验证私密、狼人和恋人消息没有进入无权玩家的记忆。
+
+### LLM 观战进度流
+
+长推理模型在夜间连续执行私密动作时，公开频道可能长时间没有游戏事件。设置 `spectator_progress: true` 或使用 `werewolf play --spectator` 后，终端会立即输出安全的行动状态，并在单次调用超过 12 秒时持续输出推理心跳。公开发言仍会在生成完成后立刻逐人显示；夜间状态统一写成“私密行动”，不会泄露具体身份、目标、狼聊或心路历程。
+
+正式的 100% LLM 对局建议同时设置 `strict_controllers: true`，或使用：
+
+```bash
+werewolf play --config movie.json --spectator --strict-controllers \
+  --transcript game_runs/movie_public.log
+```
+
+严格模式下，API 失败、无效 JSON 或非法选择会直接终止本局，不会悄悄替换成本地 bot，因此“全部玩家都是 LLM”可以被实际保证。
+
+`public_transcript_path` 或 `--transcript` 会把法官公告、公开发言、公开投票、合法遗言和安全观战进度实时追加到 UTF-8 文件。文件不包含角色私密信息、查验目标、守护目标、狼聊、恋人聊天或个人心路。另开终端即可实时查看：
+
+```bash
+tail -f game_runs/movie_public.log
+```
 
 ## 电影《人狼游戏》系列身份与牌组
 
