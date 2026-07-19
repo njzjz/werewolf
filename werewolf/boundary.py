@@ -23,6 +23,13 @@ class InformationBoundary:
         self._sequence = 0
         self.audit_log: list[tuple[MemoryEvent, frozenset[str]]] = []
 
+    def continue_after(self, sequence: int) -> None:
+        """Continue event numbering after restoring privacy-filtered memories."""
+        if sequence < self._sequence:
+            msg = "Cannot move the information sequence backwards"
+            raise ValueError(msg)
+        self._sequence = sequence
+
     def publish(
         self,
         *,
@@ -105,6 +112,25 @@ class InformationBoundary:
             phase=phase,
             text=text,
             visibility=Visibility.WEREWOLF,
+            recipients=recipients,
+            sender=sender,
+        )
+
+    def lovers(
+        self,
+        *,
+        day: int,
+        phase: str,
+        text: str,
+        recipients: Iterable[str],
+        sender: str | None = None,
+    ) -> MemoryEvent:
+        """Deliver a private message to the linked Lover pair."""
+        return self.publish(
+            day=day,
+            phase=phase,
+            text=text,
+            visibility=Visibility.LOVERS,
             recipients=recipients,
             sender=sender,
         )

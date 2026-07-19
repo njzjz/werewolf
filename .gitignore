@@ -162,6 +162,7 @@ cython_debug/
 #.idea/
 .ruff_cache/
 node_modules/
+game_runs/
 
 # setuptools-scm generated version file
 */_version.py

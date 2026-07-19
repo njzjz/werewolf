@@ -4,10 +4,11 @@
 
 ## 功能
 
-- 完整昼夜循环：狼人夜聊与袭击、预言家查验、女巫解药/毒药、猎人开枪、公开讨论、投票、平票辩解与重投、胜负判定。
+- 完整昼夜循环：狼人夜聊与袭击、各身份夜间能力、公开讨论、投票、平票辩解与重投、连锁死亡和胜负判定。
+- 支持电影《人狼游戏》系列牌组与身份：灵媒师、守卫、狂人、妖狐、丘比特/恋人和共有者。
 - 真人与 LLM 可以混坐；不同 LLM 玩家可以使用不同的 API、模型、人物设定和技能。
 - 每名玩家拥有独立的可见事件、私密策略笔记（心路历程）和技能提示，游戏结束后可分别导出 JSON 记忆。
-- 信息按收件人投递。公开、单人私密、狼人频道三种消息在进入玩家上下文之前就已经完成权限裁剪。
+- 信息按收件人投递。公开、单人私密、狼人频道、恋人频道四种消息在进入玩家上下文之前就已经完成权限裁剪。
 - 默认中文法官和中文 LLM 提示；配置采用 `language` 字段，目前内置 `zh-CN` 和 `en`，便于继续扩展语言目录。
 - 运行时零第三方依赖，OpenAI-compatible API 使用 Python 标准库访问。
 
@@ -20,6 +21,9 @@ python -m pip install -e .
 
 # 不需要 API，先看一局 8 人本地机器人演示
 werewolf demo --players 8 --seed 7
+
+# 自动按《人狼游戏 LOVERS》的 11 人牌组运行
+werewolf demo --preset movie_lovers --seed 7
 
 # 生成“1 真人 + 7 LLM”配置
 werewolf init werewolf.json
@@ -48,6 +52,12 @@ python -m werewolf play --config werewolf.json
   "clear_screen": true,
   "memory_directory": "game_memories",
   "context_char_limit": 24000,
+  "role_preset": "classic",
+  "spectator_progress": false,
+  "strict_controllers": false,
+  "controller_retries": 0,
+  "public_transcript_path": null,
+  "checkpoint_path": null,
   "providers": {
     "default": {
       "base_url": "https://api.openai.com/v1",
@@ -57,7 +67,8 @@ python -m werewolf play --config werewolf.json
       "timeout": 120,
       "max_tokens": 700,
       "use_json_mode": true,
-      "wire_api": "chat"
+      "wire_api": "chat",
+      "stream": true
     },
     "local": {
       "base_url": "http://127.0.0.1:8000/v1",
@@ -95,11 +106,14 @@ python -m werewolf play --config werewolf.json
 
 同一局可以配置多个 provider，从而混用 OpenAI、代理服务或本地 OpenAI-compatible 服务。`wire_api` 支持传统的 `chat`（`/chat/completions`）和 Codex 常用的 `responses`（`/responses`）。推荐通过 `api_key_env` 读取密钥，避免把真实密钥写进配置文件。若兼容服务不支持 JSON mode，将 `use_json_mode` 设为 `false`；模型仍会被提示返回 JSON。若域名同时提供 IPv4/IPv6、但当前环境无法连接 IPv6，可设置 `force_ipv4: true`，客户端仍会保留正常的 TLS 主机名验证。
 
+兼容服务支持 SSE 时建议设置 `stream: true`。客户端会持续接收 Responses 或 Chat 的文本增量并在本地组装完整 JSON，可降低长时间 `xhigh` 推理经过代理时发生 524 的概率。增量中的私密思考、狼聊和技能选择不会直接打印到公开观战日志；只有完整响应通过 JSON 与合法性校验后才进入游戏状态。
+
 玩家技能分为三层，并在开局分配身份后自动合并：
 
 1. 所有玩家自动加载 `global_gamecraft`，用于证据分级、反共识裹挟、票型一致性和平票更新。
-2. 根据真实身份自动加载且只加载一个身份技能：`role_villager`、`role_werewolf`、`role_seer`、`role_witch` 或 `role_hunter`。
-3. 最后追加配置文件中的个性技能：
+2. 根据真实身份自动加载且只加载一个身份技能：`role_villager`、`role_werewolf`、`role_seer`、`role_witch`、`role_hunter`、`role_medium`、`role_bodyguard`、`role_madman`、`role_fox`、`role_cupid` 或 `role_shared`。被丘比特选中的玩家还会追加 `subrole_lover`。
+3. 电影预设中的所有玩家额外加载 `global_movie_survival`，明确“阵营达成终局 + 本人存活”的个人胜利条件和奖金动机。
+4. 最后追加配置文件中的个性技能：
 
 - `logic`：追踪发言、投票和矛盾。
 - `social`：观察站边和关系变化。
@@ -112,8 +126,9 @@ python -m werewolf play --config werewolf.json
 
 ```text
                   ┌─ 公开事件 ───────────────> 所有玩家的个人记忆
-确定性规则引擎 ───┼─ 身份/查验/女巫信息 ────> 指定玩家的个人记忆
-                  └─ 狼队消息 ───────────────> 明确列出的狼人收件人
+确定性规则引擎 ───┼─ 身份/查验/技能结果 ────> 指定玩家的个人记忆
+                  ├─ 狼队消息 ───────────────> 明确列出的狼人收件人
+                  └─ 恋人消息 ───────────────> 明确链接的两名恋人
                                                     │
                                                     v
                                            真人界面或单个 LLM 请求
@@ -123,14 +138,78 @@ python -m werewolf play --config werewolf.json
 
 - 自己的身份与角色说明；
 - 存活/死亡玩家姓名（不含隐藏身份）；
-- 已经投递给自己的公开、私密或狼队事件；
+- 已经投递给自己的公开、私密、狼队或恋人事件；
 - 自己的策略笔记和技能。
 
-全局审计记录不会直接交给 LLM，再依赖提示词要求它“不要看”；权限裁剪发生在构造 LLM 请求之前。测试套件也会验证私密消息和狼人消息没有进入无权玩家的记忆。
+全局审计记录不会直接交给 LLM，再依赖提示词要求它“不要看”；权限裁剪发生在构造 LLM 请求之前。测试套件也会验证私密、狼人和恋人消息没有进入无权玩家的记忆。
 
-## 本项目采用的规则
+### LLM 观战进度流
 
-这是无警长的经典简化规则，支持 6–16 人：
+长推理模型在夜间连续执行私密动作时，公开频道可能长时间没有游戏事件。设置 `spectator_progress: true` 或使用 `werewolf play --spectator` 后，终端会立即输出安全的行动状态，并在单次调用超过 12 秒时持续输出推理心跳。公开发言仍会在生成完成后立刻逐人显示；夜间状态统一写成“私密行动”，不会泄露具体身份、目标、狼聊或心路历程。
+
+正式的 100% LLM 对局建议同时设置 `strict_controllers: true`，或使用：
+
+```bash
+werewolf play --config movie.json --spectator --strict-controllers \
+  --controller-retries 2 --transcript game_runs/movie_public.log \
+  --checkpoint game_runs/movie_private.checkpoint.json
+```
+
+严格模式下，API 失败、无效 JSON 或非法选择会直接终止本局，不会悄悄替换成本地 bot，因此“全部玩家都是 LLM”可以被实际保证。
+
+`controller_retries` 或 `--controller-retries` 可在严格终止前重试同一个 LLM 动作。重试仍调用原 LLM，不会使用本地 bot；观战日志会显示重试次数，但不会暴露执行私密动作的玩家身份。
+
+`checkpoint_path` 或 `--checkpoint` 会在开局、完整夜晚、完整白天以及每一次控制器成功返回后原子保存恢复数据。阶段内的每个响应都会进入动作日志；恢复时先回滚到阶段起点，再自动重放已经完成的响应，只重新请求第一个未完成动作，因此狼人票、公开票和平票聚合不会丢失或重复调用。
+
+```bash
+werewolf play --config movie.json \
+  --resume game_runs/movie_private.checkpoint.json
+```
+
+恢复点包含身份、恋人关系、个人私密记忆、心路历程和已完成的控制器响应，文件权限会设置为仅当前用户可读写。它不能作为公开观战日志分享。恢复必须使用相同语言、电影预设、玩家顺序和控制器配置；公开日志会自动截断到恢复点对应位置，再重放本阶段的已完成公开事件。
+
+`public_transcript_path` 或 `--transcript` 会把法官公告、公开发言、公开投票、合法遗言和安全观战进度实时追加到 UTF-8 文件。文件不包含角色私密信息、查验目标、守护目标、狼聊、恋人聊天或个人心路。另开终端即可实时查看：
+
+```bash
+tail -f game_runs/movie_public.log
+```
+
+## 电影《人狼游戏》系列身份与牌组
+
+`role_preset` 可选择以下电影牌组。`werewolf demo --preset ...` 未传 `--players` 时会自动采用正确人数；JSON 配置则必须提供完全相同数量的玩家。
+
+电影模式模拟影片中的现实后果：游戏内死亡等同于现实死亡。因此，阵营达成终局条件只负责结束游戏；一名玩家必须同时属于结算阵营并且仍然存活，才会列入最终获胜玩家。程序把奖金抽象成固定的 100% 奖金池，由全部存活获胜者平均分配，不绑定具体金额或币种；存活赢家越少，每人份额越高。
+
+| 预设 | 对应规则板 | 人数与身份组成 |
+| --- | --- | --- |
+| `movie_basic` | 电影系列基础板 | 10 人：狼人×2、村民×6、预言家、守卫 |
+| `movie_crazy_fox` | 《人狼游戏 CRAZY FOX》 | 12 人：狼人×3、村民×5、预言家、灵媒师、守卫、妖狐 |
+| `movie_prison_break` | 《人狼游戏 PRISON BREAK》 | 12 人：狼人×3、村民×3、预言家、灵媒师、守卫、共有者×2、狂人 |
+| `movie_lovers` | 《人狼游戏 LOVERS》 | 11 人：狼人×2、村民×5、预言家、灵媒师、守卫、丘比特 |
+| `movie_mad_land` | 《人狼游戏 MAD LAND》 | 10 人：狼人、狂人×7、预言家、守卫 |
+
+新增身份由 Python 法官确定性执行：
+
+- `灵媒师`：每晚得知前一天被投票放逐者显示为狼人侧还是村人侧。狂人、妖狐、丘比特等非狼人均显示为村人侧。
+- `守卫`：每晚保护一名其他存活玩家，阻止当晚狼袭；不能保护自己。保护成功只公开为平安夜，不向任何玩家泄露具体原因。
+- `狂人`：不知道狼人名单、不进入狼聊、没有夜间能力，查验与灵媒结果均显示为村人侧；狼人达成胜利且狂人本人仍存活时，狂人才属于获胜玩家。胜负所需的“存活狼人数”只计算真正的狼人。
+- `共有者`：固定为两人，开局仅两名共有者互相得知身份，其他玩家不会收到这项信息。
+- `妖狐`：免疫狼人袭击，被预言家查验时当夜死亡。如果村人或狼人已满足基础胜利条件而妖狐仍存活，妖狐取代基础阵营独自获胜。
+- `丘比特/恋人`：丘比特开局指定两名不同玩家，允许选择自己。两人保留原身份和能力，额外成为恋人，并拥有独立私聊；一人死亡，另一人立即殉情。如果基础阵营满足胜利条件时两名恋人均存活，则触发恋人阵营的独占结算。恋人因条件要求必然存活；丘比特只有自己也存活时才属于获胜玩家并参与分奖。
+
+妖狐和丘比特都是会取代基础阵营结果的第三方机制。内置电影牌组不会同时出现两者；自定义固定身份也禁止混用，以免产生未经影片定义的胜利优先级。终局公告和 `GameResult.prize_shares` 会列出每名存活赢家获得的归一化奖金份额。可直接运行以下真人参与案例：
+
+```bash
+werewolf play --config examples/movie_lovers.json
+werewolf play --config examples/movie_crazy_fox.json
+werewolf play --config examples/movie_mad_land.json
+```
+
+## 经典规则
+
+`classic` 是无警长的经典简化规则，支持 6–16 人：
+
+经典模式保持普通桌游语义：阵营获胜时，同阵营已死亡玩家仍视为获胜，且不计算电影奖金份额。
 
 - 6–8 人为 2 狼，9–11 人为 3 狼，12–14 人为 4 狼，15–16 人为 5 狼。
 - 固定包含预言家和女巫；7 人及以上加入猎人，其余为平民。
@@ -210,6 +289,7 @@ werewolf play --config examples/16_llm_responses.json
 默认在 `game_memories/` 下为每个玩家生成一个文件，包含：
 
 - 该玩家的最终身份和技能；
+- 若该玩家是恋人，仅在其个人文件中记录恋人 ID 与姓名；
 - 只属于该玩家的权限裁剪后事件；
 - 该玩家每次行动保存的私密 `thought` / `note`。
 

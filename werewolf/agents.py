@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from .models import (
@@ -23,7 +24,7 @@ from .models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from .config import LLMProviderConfig
 
@@ -104,8 +105,21 @@ class Controller(Protocol):
 class Terminal:
     """Small terminal adapter that supports pass-and-play privacy."""
 
-    def __init__(self, *, clear_screen: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        clear_screen: bool = True,
+        transcript_path: str | Path | None = None,
+        reset_transcript: bool = True,
+    ) -> None:
         self.clear_screen = clear_screen
+        self.transcript_path = Path(transcript_path) if transcript_path else None
+        if self.transcript_path is not None:
+            self.transcript_path.parent.mkdir(parents=True, exist_ok=True)
+            if reset_transcript:
+                self.transcript_path.write_text("", encoding="utf-8")
+            else:
+                self.transcript_path.touch(exist_ok=True)
 
     def clear(self) -> None:
         """Clear only interactive terminals; captured logs remain readable."""
@@ -114,7 +128,42 @@ class Terminal:
 
     def announce(self, text: str) -> None:
         """Print a public judge announcement."""
-        print(f"\n[法官] {text}", flush=True)
+        self._emit(f"\n[法官] {text}")
+
+    def progress(self, text: str) -> None:
+        """Print a non-authoritative spectator heartbeat without game secrets."""
+        self._emit(f"[观战] {text}")
+
+    def say(self, player_name: str, text: str) -> None:
+        """Print and persist one completed public player statement."""
+        self._emit(f"[{player_name}] {text}")
+
+    def _emit(self, rendered: str) -> None:
+        """Write a public line to stdout and the optional spectator transcript."""
+        print(rendered, flush=True)
+        if self.transcript_path is not None:
+            with self.transcript_path.open("a", encoding="utf-8") as file:
+                file.write(rendered + "\n")
+
+    def transcript_size(self) -> int | None:
+        """Return the current public transcript size in bytes, if configured."""
+        if self.transcript_path is None:
+            return None
+        return self.transcript_path.stat().st_size
+
+    def truncate_transcript(self, size: int | None) -> None:
+        """Roll a transcript back to a checkpoint byte offset without padding it."""
+        if self.transcript_path is None or size is None:
+            return
+        current_size = self.transcript_path.stat().st_size
+        if current_size < size:
+            msg = (
+                f"Transcript {self.transcript_path} is shorter than checkpoint "
+                f"offset {size}"
+            )
+            raise ValueError(msg)
+        with self.transcript_path.open("r+b") as file:
+            file.truncate(size)
 
     def private_turn(self, view: PlayerView) -> None:
         """Render only the active human's already-authorized memory."""
@@ -125,6 +174,9 @@ class Terminal:
         else:
             print(f"=== {view.name} 的私密回合 | 身份：{view.role_name} ===")
             print(view.role_description)
+        if view.lover:
+            lover_label = "Lover" if view.language == "en" else "恋人"
+            print(f"{lover_label}: {view.lover[1]}")
         recent = view.events[-18:]
         if recent:
             title = (
@@ -138,6 +190,7 @@ class Terminal:
                     Visibility.PUBLIC: "公开",
                     Visibility.PRIVATE: "私密",
                     Visibility.WEREWOLF: "狼队",
+                    Visibility.LOVERS: "恋人",
                 }[event.visibility]
                 if view.language == "en":
                     marker = event.visibility.value
@@ -165,6 +218,7 @@ class HumanController:
             ActionKind.SPEAK,
             ActionKind.LAST_WORDS,
             ActionKind.TEAM_CHAT,
+            ActionKind.LOVER_CHAT,
         }:
             text = input("> ").strip()
             thought = self._thought(view)
@@ -229,7 +283,12 @@ class OpenAICompatibleClient:
     def complete(self, messages: list[dict[str, str]]) -> str:
         """Return assistant content from an OpenAI-compatible response."""
         payload = self._payload(messages)
-        response = self.transport(payload) if self.transport else self._post(payload)
+        if self.transport:
+            response = self.transport(payload)
+        elif self.config.stream:
+            return self._post_stream(payload)
+        else:
+            response = self._post(payload)
         if self.config.wire_api == "responses":
             return self._responses_content(response)
         try:
@@ -288,7 +347,8 @@ class OpenAICompatibleClient:
         msg = f"Malformed Responses API response: {response!r}"
         raise RuntimeError(msg)
 
-    def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _request(self, payload: dict[str, Any]) -> urllib.request.Request:
+        """Build one authenticated request without exposing its credentials."""
         endpoint = self.config.base_url.rstrip("/")
         suffix = (
             "/responses" if self.config.wire_api == "responses" else "/chat/completions"
@@ -302,19 +362,28 @@ class OpenAICompatibleClient:
         api_key = self.config.resolved_api_key()
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        request = urllib.request.Request(  # noqa: S310 - URL is an explicit user configuration.
+        return urllib.request.Request(  # noqa: S310 - URL is an explicit user configuration.
             endpoint,
             data=json.dumps(payload).encode(),
             headers=headers,
             method="POST",
         )
+
+    def _opener(self) -> urllib.request.OpenerDirector:
+        """Return the configured network opener, optionally forcing IPv4."""
+        return (
+            urllib.request.build_opener(_IPv4HTTPHandler(), _IPv4HTTPSHandler())
+            if self.config.force_ipv4
+            else urllib.request.build_opener()
+        )
+
+    def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request = self._request(payload)
         try:
-            opener = (
-                urllib.request.build_opener(_IPv4HTTPHandler(), _IPv4HTTPSHandler())
-                if self.config.force_ipv4
-                else urllib.request.build_opener()
-            )
-            with opener.open(request, timeout=self.config.timeout) as response:
+            with self._opener().open(
+                request,
+                timeout=self.config.timeout,
+            ) as response:
                 return json.loads(response.read().decode())
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode(errors="replace")[:1000]
@@ -323,6 +392,79 @@ class OpenAICompatibleClient:
         except urllib.error.URLError as exc:
             msg = f"Could not reach LLM API: {exc.reason}"
             raise RuntimeError(msg) from exc
+
+    def _post_stream(self, payload: dict[str, Any]) -> str:
+        """Consume an SSE response incrementally and return assembled model text."""
+        stream_payload = {**payload, "stream": True}
+        request = self._request(stream_payload)
+        try:
+            with self._opener().open(
+                request,
+                timeout=self.config.timeout,
+            ) as response:
+                return self._stream_content(response)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")[:1000]
+            msg = f"LLM API returned HTTP {exc.code}: {detail}"
+            raise RuntimeError(msg) from exc
+        except urllib.error.URLError as exc:
+            msg = f"Could not reach LLM API: {exc.reason}"
+            raise RuntimeError(msg) from exc
+
+    def _stream_content(self, lines: Iterable[bytes]) -> str:
+        """Extract assistant text deltas from Responses or Chat SSE events."""
+        parts: list[str] = []
+        completed_response: dict[str, Any] | None = None
+        for raw_line in lines:
+            line = raw_line.decode(errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data_text = line.removeprefix("data:").strip()
+            if not data_text or data_text == "[DONE]":
+                continue
+            try:
+                event = json.loads(data_text)
+            except json.JSONDecodeError as exc:
+                msg = f"Malformed streaming event: {data_text[:500]}"
+                raise RuntimeError(msg) from exc
+            event_type = event.get("type")
+            if event_type in {"error", "response.failed"}:
+                error = event.get("error") or event.get("response", {}).get("error")
+                msg = f"LLM streaming API failed: {error or event!r}"
+                raise RuntimeError(msg)
+            if event_type == "response.output_text.delta":
+                delta = event.get("delta")
+                if isinstance(delta, str):
+                    parts.append(delta)
+                continue
+            if event_type == "response.output_text.done" and not parts:
+                text = event.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                continue
+            if event_type == "response.completed":
+                response = event.get("response")
+                if isinstance(response, dict):
+                    completed_response = response
+                continue
+            for choice in event.get("choices", []):
+                if not isinstance(choice, dict):
+                    continue
+                content = choice.get("delta", {}).get("content")
+                if isinstance(content, str):
+                    parts.append(content)
+                elif isinstance(content, list):
+                    parts.extend(
+                        str(item.get("text", ""))
+                        for item in content
+                        if isinstance(item, dict)
+                    )
+        if parts:
+            return "".join(parts)
+        if completed_response is not None:
+            return self._responses_content(completed_response)
+        msg = "Streaming API completed without assistant text"
+        raise RuntimeError(msg)
 
 
 class LLMController:
@@ -372,8 +514,9 @@ class LLMController:
             "不得假设或索取其他玩家的私密上下文。法官是确定性程序，必须服从合法选项。\n"
             f"{language_rule}\n你的名字：{view.name}\n你的身份：{view.role_name}\n"
             f"身份说明：{view.role_description}\n人物设定：{self.persona or '自然参与游戏'}\n"
+            f"恋人信息：{view.lover[1] if view.lover else '无'}\n"
             f"个人技能：\n{skills}\n"
-            "仅返回一个 JSON 对象：choice 是选项 value 或 null；text 是要公开/狼队发送的内容；"
+            "仅返回一个 JSON 对象：choice 是选项 value 或 null；text 是要公开或向指定私密频道发送的内容；"
             "thought 是仅写入你个人记忆的简短策略与判断；note 可记录待验证事项。"
         )
         event_lines = [
@@ -447,8 +590,13 @@ class BotController:
     def act(self, view: PlayerView, request: ActionRequest) -> AgentResponse:
         """Choose only from the supplied legal options without hidden state."""
         thought = self._thought(view, request)
-        if request.kind is ActionKind.TEAM_CHAT:
-            return AgentResponse(text=self._team_message(view), thought=thought)
+        if request.kind in {ActionKind.TEAM_CHAT, ActionKind.LOVER_CHAT}:
+            message = (
+                self._team_message(view)
+                if request.kind is ActionKind.TEAM_CHAT
+                else self._lover_message(view)
+            )
+            return AgentResponse(text=message, thought=thought)
         if request.kind in {ActionKind.SPEAK, ActionKind.LAST_WORDS}:
             return AgentResponse(text=self._speech(view, request), thought=thought)
         if not request.options or (request.allow_abstain and self.rng.random() < 0.12):
@@ -489,6 +637,15 @@ class BotController:
         if view.language == "en":
             return f"I suggest attacking {target}; keep our daytime positions separate."
         return f"建议考虑袭击{target}，白天尽量不要让我们的站边完全一致。"
+
+    @staticmethod
+    def _lover_message(view: PlayerView) -> str:
+        partner = view.lover[1] if view.lover else "partner"
+        if view.language == "en":
+            return (
+                f"{partner}, we should keep both of us alive without exposing our link."
+            )
+        return f"{partner}，我们需要同时存活，并避免公开暴露恋人关系。"
 
     @staticmethod
     def _thought(view: PlayerView, request: ActionRequest) -> str:

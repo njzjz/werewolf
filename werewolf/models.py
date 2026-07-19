@@ -15,10 +15,12 @@ T = TypeVar("T")
 
 
 class Faction(str, Enum):
-    """The two factions used by the supported classic rule set."""
+    """Primary and conditional winning factions."""
 
     GOOD = "good"
     WEREWOLF = "werewolf"
+    FOX = "fox"
+    LOVERS = "lovers"
 
 
 class Role(str, Enum):
@@ -29,13 +31,28 @@ class Role(str, Enum):
     SEER = "seer"
     WITCH = "witch"
     HUNTER = "hunter"
+    MEDIUM = "medium"
+    BODYGUARD = "bodyguard"
+    MADMAN = "madman"
+    FOX = "fox"
+    CUPID = "cupid"
+    SHARED = "shared"
 
     @property
     def faction(self) -> Faction:
         """Return the faction that wins or loses together."""
-        if self is Role.WEREWOLF:
+        if self in {Role.WEREWOLF, Role.MADMAN}:
             return Faction.WEREWOLF
+        if self is Role.FOX:
+            return Faction.FOX
+        if self is Role.CUPID:
+            return Faction.LOVERS
         return Faction.GOOD
+
+    @property
+    def appears_werewolf(self) -> bool:
+        """Return whether Seer/Medium information reports werewolf alignment."""
+        return self is Role.WEREWOLF
 
 
 ROLE_NAMES: dict[str, dict[Role, str]] = {
@@ -45,6 +62,12 @@ ROLE_NAMES: dict[str, dict[Role, str]] = {
         Role.SEER: "预言家",
         Role.WITCH: "女巫",
         Role.HUNTER: "猎人",
+        Role.MEDIUM: "灵媒师",
+        Role.BODYGUARD: "守卫",
+        Role.MADMAN: "狂人",
+        Role.FOX: "妖狐",
+        Role.CUPID: "丘比特",
+        Role.SHARED: "共有者",
     },
     "en": {
         Role.VILLAGER: "Villager",
@@ -52,6 +75,12 @@ ROLE_NAMES: dict[str, dict[Role, str]] = {
         Role.SEER: "Seer",
         Role.WITCH: "Witch",
         Role.HUNTER: "Hunter",
+        Role.MEDIUM: "Medium",
+        Role.BODYGUARD: "Bodyguard",
+        Role.MADMAN: "Madman",
+        Role.FOX: "Fox",
+        Role.CUPID: "Cupid",
+        Role.SHARED: "Shared Player",
     },
 }
 
@@ -59,16 +88,28 @@ ROLE_DESCRIPTIONS: dict[str, dict[Role, str]] = {
     "zh-CN": {
         Role.VILLAGER: "白天分析发言与投票，找出全部狼人。",
         Role.WEREWOLF: "夜间与队友私聊并共同袭击一名好人，白天隐藏身份。",
-        Role.SEER: "每晚查验一名存活玩家，得知其阵营。",
+        Role.SEER: "每晚查验一名存活玩家，得知其显示为狼人侧还是村人侧。",
         Role.WITCH: "整局各有一瓶解药和毒药；默认同一夜只能使用一瓶。",
         Role.HUNTER: "死亡时可开枪带走一名存活玩家，但被女巫毒死时不能开枪。",
+        Role.MEDIUM: "每晚得知前一天被投票放逐者显示为狼人侧还是村人侧。",
+        Role.BODYGUARD: "每晚保护一名其他玩家，使其免受当晚狼人袭击。",
+        Role.MADMAN: "没有夜间能力且不进入狼聊；狼人达成胜利且你本人存活时获胜，查验显示村人侧。",
+        Role.FOX: "狼人袭击无法杀死你；被预言家查验会死亡，基础游戏结束时存活则独自获胜。",
+        Role.CUPID: "开局指定两名恋人；恋人均存活会触发独占结算，你本人也须存活才能获胜。",
+        Role.SHARED: "开局得知另一名共有者；你们属于村人侧，没有额外夜间能力。",
     },
     "en": {
         Role.VILLAGER: "Analyze discussion and votes to eliminate every werewolf.",
         Role.WEREWOLF: "Chat privately and attack at night while hiding by day.",
-        Role.SEER: "Inspect one living player each night to learn their faction.",
+        Role.SEER: "Inspect one living player each night to learn whether they appear werewolf-side or village-side.",
         Role.WITCH: "Has one antidote and one poison; only one may be used per night by default.",
         Role.HUNTER: "May shoot one living player when killed, except when poisoned by the Witch.",
+        Role.MEDIUM: "Learns whether the previous day's exile appeared werewolf-side or village-side.",
+        Role.BODYGUARD: "Protects one other player from the werewolf attack each night.",
+        Role.MADMAN: "Has no night action or wolf chat; wins if alive when werewolves prevail and appears village-side.",
+        Role.FOX: "Survives werewolf attacks, dies when inspected, and wins alone if alive at game end.",
+        Role.CUPID: "Links two Lovers; their survival triggers the exclusive result, but Cupid must also survive to win.",
+        Role.SHARED: "Knows the other Shared Player; belongs to the good faction with no night action.",
     },
 }
 
@@ -84,6 +125,7 @@ class Visibility(str, Enum):
     PUBLIC = "public"
     PRIVATE = "private"
     WEREWOLF = "werewolf"
+    LOVERS = "lovers"
 
 
 @dataclass(frozen=True)
@@ -145,6 +187,7 @@ class PlayerState:
     skills: tuple[Skill, ...]
     memory: PlayerMemory = field(default_factory=PlayerMemory)
     alive: bool = True
+    lover_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -157,6 +200,7 @@ class PlayerView:
     role_name: str
     role_description: str
     faction: Faction
+    lover: tuple[str, str] | None
     alive_players: tuple[tuple[str, str], ...]
     dead_players: tuple[tuple[str, str], ...]
     events: tuple[MemoryEvent, ...]
@@ -179,6 +223,9 @@ class ActionKind(str, Enum):
     WITCH_SAVE = "witch_save"
     WITCH_POISON = "witch_poison"
     HUNTER_SHOOT = "hunter_shoot"
+    BODYGUARD_PROTECT = "bodyguard_protect"
+    CUPID_LINK = "cupid_link"
+    LOVER_CHAT = "lover_chat"
 
 
 @dataclass(frozen=True)

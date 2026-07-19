@@ -1,0 +1,20 @@
+{
+  "language": "zh-CN",
+  "role_preset": "movie_lovers",
+  "seed": null,
+  "clear_screen": true,
+  "memory_directory": "game_memories/movie_lovers",
+  "players": [
+    {"name": "你", "controller": "human", "skills": ["logic", "social", "memory"]},
+    {"name": "玩家02", "controller": "bot", "skills": ["logic", "memory"]},
+    {"name": "玩家03", "controller": "bot", "skills": ["logic", "memory"]},
+    {"name": "玩家04", "controller": "bot", "skills": ["logic", "memory"]},
+    {"name": "玩家05", "controller": "bot", "skills": ["logic", "memory"]},
+    {"name": "玩家06", "controller": "bot", "skills": ["logic", "memory"]},
+    {"name": "玩家07", "controller": "bot", "skills": ["logic", "memory"]},
+    {"name": "玩家08", "controller": "bot", "skills": ["logic", "memory"]},
+    {"name": "玩家09", "controller": "bot", "skills": ["logic", "memory"]},
+    {"name": "玩家10", "controller": "bot", "skills": ["logic", "memory"]},
+    {"name": "玩家11", "controller": "bot", "skills": ["logic", "memory"]}
+  ]
+}

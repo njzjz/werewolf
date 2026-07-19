@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from werewolf.agents import LLMController, OpenAICompatibleClient
+from werewolf.agents import LLMController, OpenAICompatibleClient, Terminal
 from werewolf.config import LLMProviderConfig
 from werewolf.models import (
     ActionKind,
@@ -46,6 +46,7 @@ def test_llm_receives_only_supplied_personal_view() -> None:
         role_name="预言家",
         role_description="每晚查验一人",
         faction=Faction.GOOD,
+        lover=None,
         alive_players=(("p1", "一号"), ("p2", "二号")),
         dead_players=(),
         events=(
@@ -123,3 +124,41 @@ def test_responses_api_payload_and_output_shape() -> None:
     assert captured["reasoning"] == {"effort": "low"}
     assert captured["store"] is False
     assert "messages" not in captured
+
+
+def test_terminal_persists_only_explicit_public_output(tmp_path) -> None:
+    """The spectator transcript should mirror judge, progress, and public speech."""
+    transcript = tmp_path / "public.log"
+    terminal = Terminal(clear_screen=False, transcript_path=transcript)
+
+    terminal.announce("天亮了。")
+    terminal.progress("公开行动处理中……")
+    terminal.say("玩家01", "这是公开发言。")
+
+    assert transcript.read_text(encoding="utf-8") == (
+        "\n[法官] 天亮了。\n[观战] 公开行动处理中……\n[玩家01] 这是公开发言。\n"
+    )
+
+
+def test_responses_sse_stream_is_assembled_without_exposing_partial_json() -> None:
+    """Responses text deltas should reconstruct one complete controller payload."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(
+            base_url="https://example.invalid/v1",
+            model="streaming-model",
+            wire_api="responses",
+            stream=True,
+        ),
+    )
+
+    content = client._stream_content(  # noqa: SLF001 - SSE parsing is the unit under test.
+        [
+            b"event: response.output_text.delta\n",
+            b'data: {"type":"response.output_text.delta","delta":"{\\"text\\":\\"ni"}\n',
+            b'data: {"type":"response.output_text.delta","delta":"hao\\"}"}\n',
+            b'data: {"type":"response.completed","response":{}}\n',
+            b"data: [DONE]\n",
+        ],
+    )
+
+    assert content == '{"text":"nihao"}'

@@ -64,7 +64,77 @@ ROLE_SKILLS: dict[Role, Skill] = {
             "说明开枪或不开枪的可核验依据，不把遗言中的猜测表述成法官确认。"
         ),
     ),
+    Role.MEDIUM: Skill(
+        name="role_medium",
+        description="灵媒师信息管理",
+        instructions=(
+            "准确记录法官给出的前一日放逐者阵营结果，并与公开票型结合。查验只能区分狼人和非狼人，"
+            "狂人、妖狐等会显示为村人侧；公开身份时不得把阵营结果夸大为具体角色。"
+        ),
+    ),
+    Role.BODYGUARD: Skill(
+        name="role_bodyguard",
+        description="守卫守护策略",
+        instructions=(
+            "每晚基于公开可信度、技能价值和狼人袭击动机选择一名其他玩家保护。守护成功不会自动"
+            "确认目标身份，平安夜也可能来自狼人袭击妖狐或其他原因；不要泄露守护计划给狼人。"
+        ),
+    ),
+    Role.MADMAN: Skill(
+        name="role_madman",
+        description="狂人协助策略",
+        instructions=(
+            "狼人达成阵营胜利且你本人存活时，你才获胜；你不知道狼人名单、不能进入狼聊，"
+            "预言家和灵媒师会把你显示为村人侧。"
+            "通过公开发言制造错误共识、必要时伪装信息角色或替狼人承受放逐，同时避免意外推动真狼人出局。"
+        ),
+    ),
+    Role.FOX: Skill(
+        name="role_fox",
+        description="妖狐生存策略",
+        instructions=(
+            "你的唯一目标是在基础阵营决出胜负时仍然存活。狼人袭击杀不死你，但预言家查验会令你死亡。"
+            "避免成为查验和放逐目标，可在狼人与村人之间动态平衡局势，但不要公开声称自己的免疫能力。"
+        ),
+    ),
+    Role.CUPID: Skill(
+        name="role_cupid",
+        description="丘比特恋人布局",
+        instructions=(
+            "开局选择能共同存活且彼此身份组合有战略价值的两名恋人。你知道恋人名单但不进入恋人私聊；"
+            "基础游戏结束时两名恋人都存活会触发独占结算，但你本人也必须存活才能分享胜利和奖金。"
+            "白天应隐蔽保护双方、保护自己并控制终局节奏。"
+        ),
+    ),
+    Role.SHARED: Skill(
+        name="role_shared",
+        description="共有者互证策略",
+        instructions=(
+            "你知道另一名共有者必属村人侧。选择合适时机公开互证，建立可信信息核心；若其中一人暴露，"
+            "另一人应保留可验证的共同信息，同时防止狼人利用共有者名单锁定其他信息角色。"
+        ),
+    ),
 }
+
+LOVER_SKILL = Skill(
+    name="subrole_lover",
+    description="恋人共同胜利",
+    instructions=(
+        "你保留原身份和能力，但与恋人共享额外胜利条件：基础游戏结束时你们必须同时存活；任一方死亡，"
+        "另一方立即殉情。利用恋人私聊协调公开立场，同时兼顾原阵营信息，不要暴露关系或让原阵营过早终局。"
+    ),
+)
+
+MOVIE_SURVIVAL_SKILL = Skill(
+    name="global_movie_survival",
+    description="电影模式生存与奖金目标",
+    instructions=(
+        "电影模式中，阵营满足胜利条件只会触发结算；你本人还必须存活才属于获胜玩家。"
+        "固定奖金池由所有存活获胜者平均分配，因此存活赢家越少，每人的奖金份额越高。"
+        "不要为了减少分钱人数而过早破坏本阵营达成终局所需的票数、能力或信息链；进入终局后，"
+        "在确保阵营胜利的前提下，同时优化自己的生存概率和最终共同获胜人数。"
+    ),
+)
 
 BUILTIN_SKILLS: dict[str, Skill] = {
     "logic": Skill(
@@ -118,3 +188,17 @@ def resolve_player_skills(role: Role, names: list[str]) -> tuple[Skill, ...]:
     for skill in ordered:
         unique.setdefault(skill.name, skill)
     return tuple(unique.values())
+
+
+def add_lover_skill(skills: tuple[Skill, ...]) -> tuple[Skill, ...]:
+    """Append the Lover subrole playbook exactly once."""
+    if any(skill.name == LOVER_SKILL.name for skill in skills):
+        return skills
+    return (*skills, LOVER_SKILL)
+
+
+def add_movie_survival_skill(skills: tuple[Skill, ...]) -> tuple[Skill, ...]:
+    """Append the film-specific survival and prize objective exactly once."""
+    if any(skill.name == MOVIE_SURVIVAL_SKILL.name for skill in skills):
+        return skills
+    return (*skills, MOVIE_SURVIVAL_SKILL)
