@@ -49,3 +49,22 @@ def test_boundary_rejects_unknown_recipients() -> None:
 
     with pytest.raises(ValueError, match="missing"):
         boundary.private(day=0, phase="setup", text="秘密", recipient="missing")
+
+
+def test_lover_channel_is_delivered_only_to_the_linked_pair() -> None:
+    """Lover chat is a separate capability and must fail closed for outsiders."""
+    first = make_player("p1", "恋人一", Role.VILLAGER)
+    second = make_player("p2", "恋人二", Role.WEREWOLF)
+    outsider = make_player("p3", "旁观者", Role.SEER)
+    boundary = InformationBoundary([first, second, outsider])
+
+    boundary.lovers(
+        day=1,
+        phase="night",
+        text="恋人秘密",
+        recipients=("p1", "p2"),
+    )
+
+    assert first.memory.events[-1].visibility is Visibility.LOVERS
+    assert second.memory.events[-1].text == "恋人秘密"
+    assert not outsider.memory.events

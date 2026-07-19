@@ -108,3 +108,22 @@ class InformationBoundary:
             recipients=recipients,
             sender=sender,
         )
+
+    def lovers(
+        self,
+        *,
+        day: int,
+        phase: str,
+        text: str,
+        recipients: Iterable[str],
+        sender: str | None = None,
+    ) -> MemoryEvent:
+        """Deliver a private message to the linked Lover pair."""
+        return self.publish(
+            day=day,
+            phase=phase,
+            text=text,
+            visibility=Visibility.LOVERS,
+            recipients=recipients,
+            sender=sender,
+        )

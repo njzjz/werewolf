@@ -46,6 +46,7 @@ def test_llm_receives_only_supplied_personal_view() -> None:
         role_name="预言家",
         role_description="每晚查验一人",
         faction=Faction.GOOD,
+        lover=None,
         alive_players=(("p1", "一号"), ("p2", "二号")),
         dead_players=(),
         events=(

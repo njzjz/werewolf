@@ -125,6 +125,9 @@ class Terminal:
         else:
             print(f"=== {view.name} 的私密回合 | 身份：{view.role_name} ===")
             print(view.role_description)
+        if view.lover:
+            lover_label = "Lover" if view.language == "en" else "恋人"
+            print(f"{lover_label}: {view.lover[1]}")
         recent = view.events[-18:]
         if recent:
             title = (
@@ -138,6 +141,7 @@ class Terminal:
                     Visibility.PUBLIC: "公开",
                     Visibility.PRIVATE: "私密",
                     Visibility.WEREWOLF: "狼队",
+                    Visibility.LOVERS: "恋人",
                 }[event.visibility]
                 if view.language == "en":
                     marker = event.visibility.value
@@ -165,6 +169,7 @@ class HumanController:
             ActionKind.SPEAK,
             ActionKind.LAST_WORDS,
             ActionKind.TEAM_CHAT,
+            ActionKind.LOVER_CHAT,
         }:
             text = input("> ").strip()
             thought = self._thought(view)
@@ -372,8 +377,9 @@ class LLMController:
             "不得假设或索取其他玩家的私密上下文。法官是确定性程序，必须服从合法选项。\n"
             f"{language_rule}\n你的名字：{view.name}\n你的身份：{view.role_name}\n"
             f"身份说明：{view.role_description}\n人物设定：{self.persona or '自然参与游戏'}\n"
+            f"恋人信息：{view.lover[1] if view.lover else '无'}\n"
             f"个人技能：\n{skills}\n"
-            "仅返回一个 JSON 对象：choice 是选项 value 或 null；text 是要公开/狼队发送的内容；"
+            "仅返回一个 JSON 对象：choice 是选项 value 或 null；text 是要公开或向指定私密频道发送的内容；"
             "thought 是仅写入你个人记忆的简短策略与判断；note 可记录待验证事项。"
         )
         event_lines = [
@@ -447,8 +453,13 @@ class BotController:
     def act(self, view: PlayerView, request: ActionRequest) -> AgentResponse:
         """Choose only from the supplied legal options without hidden state."""
         thought = self._thought(view, request)
-        if request.kind is ActionKind.TEAM_CHAT:
-            return AgentResponse(text=self._team_message(view), thought=thought)
+        if request.kind in {ActionKind.TEAM_CHAT, ActionKind.LOVER_CHAT}:
+            message = (
+                self._team_message(view)
+                if request.kind is ActionKind.TEAM_CHAT
+                else self._lover_message(view)
+            )
+            return AgentResponse(text=message, thought=thought)
         if request.kind in {ActionKind.SPEAK, ActionKind.LAST_WORDS}:
             return AgentResponse(text=self._speech(view, request), thought=thought)
         if not request.options or (request.allow_abstain and self.rng.random() < 0.12):
@@ -489,6 +500,15 @@ class BotController:
         if view.language == "en":
             return f"I suggest attacking {target}; keep our daytime positions separate."
         return f"建议考虑袭击{target}，白天尽量不要让我们的站边完全一致。"
+
+    @staticmethod
+    def _lover_message(view: PlayerView) -> str:
+        partner = view.lover[1] if view.lover else "partner"
+        if view.language == "en":
+            return (
+                f"{partner}, we should keep both of us alive without exposing our link."
+            )
+        return f"{partner}，我们需要同时存活，并避免公开暴露恋人关系。"
 
     @staticmethod
     def _thought(view: PlayerView, request: ActionRequest) -> str:
