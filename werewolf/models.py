@@ -93,9 +93,9 @@ ROLE_DESCRIPTIONS: dict[str, dict[Role, str]] = {
         Role.HUNTER: "死亡时可开枪带走一名存活玩家，但被女巫毒死时不能开枪。",
         Role.MEDIUM: "每晚得知前一天被投票放逐者显示为狼人侧还是村人侧。",
         Role.BODYGUARD: "每晚保护一名其他玩家，使其免受当晚狼人袭击。",
-        Role.MADMAN: "没有夜间能力且不进入狼聊；狼人获胜时你一同获胜，查验显示村人侧。",
+        Role.MADMAN: "没有夜间能力且不进入狼聊；狼人达成胜利且你本人存活时获胜，查验显示村人侧。",
         Role.FOX: "狼人袭击无法杀死你；被预言家查验会死亡，基础游戏结束时存活则独自获胜。",
-        Role.CUPID: "开局指定两名恋人；基础游戏结束时恋人均存活，则丘比特与恋人独占胜利。",
+        Role.CUPID: "开局指定两名恋人；恋人均存活会触发独占结算，你本人也须存活才能获胜。",
         Role.SHARED: "开局得知另一名共有者；你们属于村人侧，没有额外夜间能力。",
     },
     "en": {
@@ -106,9 +106,9 @@ ROLE_DESCRIPTIONS: dict[str, dict[Role, str]] = {
         Role.HUNTER: "May shoot one living player when killed, except when poisoned by the Witch.",
         Role.MEDIUM: "Learns whether the previous day's exile appeared werewolf-side or village-side.",
         Role.BODYGUARD: "Protects one other player from the werewolf attack each night.",
-        Role.MADMAN: "Has no night action or wolf chat; wins with werewolves and appears village-side.",
+        Role.MADMAN: "Has no night action or wolf chat; wins if alive when werewolves prevail and appears village-side.",
         Role.FOX: "Survives werewolf attacks, dies when inspected, and wins alone if alive at game end.",
-        Role.CUPID: "Links two Lovers at setup and wins with them if both survive the base game.",
+        Role.CUPID: "Links two Lovers; their survival triggers the exclusive result, but Cupid must also survive to win.",
         Role.SHARED: "Knows the other Shared Player; belongs to the good faction with no night action.",
     },
 }

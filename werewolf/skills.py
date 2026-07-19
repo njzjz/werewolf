@@ -84,7 +84,8 @@ ROLE_SKILLS: dict[Role, Skill] = {
         name="role_madman",
         description="狂人协助策略",
         instructions=(
-            "你与狼人共同获胜，但不知道狼人名单、不能进入狼聊，预言家和灵媒师会把你显示为村人侧。"
+            "狼人达成阵营胜利且你本人存活时，你才获胜；你不知道狼人名单、不能进入狼聊，"
+            "预言家和灵媒师会把你显示为村人侧。"
             "通过公开发言制造错误共识、必要时伪装信息角色或替狼人承受放逐，同时避免意外推动真狼人出局。"
         ),
     ),
@@ -101,7 +102,8 @@ ROLE_SKILLS: dict[Role, Skill] = {
         description="丘比特恋人布局",
         instructions=(
             "开局选择能共同存活且彼此身份组合有战略价值的两名恋人。你知道恋人名单但不进入恋人私聊；"
-            "基础游戏结束时两名恋人都存活，你才与他们独占胜利。白天应隐蔽保护双方并控制终局节奏。"
+            "基础游戏结束时两名恋人都存活会触发独占结算，但你本人也必须存活才能分享胜利和奖金。"
+            "白天应隐蔽保护双方、保护自己并控制终局节奏。"
         ),
     ),
     Role.SHARED: Skill(
@@ -120,6 +122,17 @@ LOVER_SKILL = Skill(
     instructions=(
         "你保留原身份和能力，但与恋人共享额外胜利条件：基础游戏结束时你们必须同时存活；任一方死亡，"
         "另一方立即殉情。利用恋人私聊协调公开立场，同时兼顾原阵营信息，不要暴露关系或让原阵营过早终局。"
+    ),
+)
+
+MOVIE_SURVIVAL_SKILL = Skill(
+    name="global_movie_survival",
+    description="电影模式生存与奖金目标",
+    instructions=(
+        "电影模式中，阵营满足胜利条件只会触发结算；你本人还必须存活才属于获胜玩家。"
+        "固定奖金池由所有存活获胜者平均分配，因此存活赢家越少，每人的奖金份额越高。"
+        "不要为了减少分钱人数而过早破坏本阵营达成终局所需的票数、能力或信息链；进入终局后，"
+        "在确保阵营胜利的前提下，同时优化自己的生存概率和最终共同获胜人数。"
     ),
 )
 
@@ -182,3 +195,10 @@ def add_lover_skill(skills: tuple[Skill, ...]) -> tuple[Skill, ...]:
     if any(skill.name == LOVER_SKILL.name for skill in skills):
         return skills
     return (*skills, LOVER_SKILL)
+
+
+def add_movie_survival_skill(skills: tuple[Skill, ...]) -> tuple[Skill, ...]:
+    """Append the film-specific survival and prize objective exactly once."""
+    if any(skill.name == MOVIE_SURVIVAL_SKILL.name for skill in skills):
+        return skills
+    return (*skills, MOVIE_SURVIVAL_SKILL)

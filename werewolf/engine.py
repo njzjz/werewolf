@@ -35,7 +35,7 @@ from .models import (
     Role,
     localized,
 )
-from .skills import add_lover_skill, resolve_player_skills
+from .skills import add_lover_skill, add_movie_survival_skill, resolve_player_skills
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -60,6 +60,7 @@ class GameResult:
 
     winner: Faction | None
     winning_players: tuple[str, ...]
+    prize_shares: tuple[tuple[str, float], ...]
     days: int
     survivors: tuple[str, ...]
     reason: str
@@ -175,13 +176,16 @@ class Game:
                 seat.persona,
                 controllers or {},
             )
+            skills = resolve_player_skills(role, list(seat.skills))
+            if config.role_preset != "classic":
+                skills = add_movie_survival_skill(skills)
             self.players.append(
                 PlayerState(
                     player_id=player_id,
                     name=seat.name,
                     role=role,
                     controller=controller,
-                    skills=resolve_player_skills(role, list(seat.skills)),
+                    skills=skills,
                 ),
             )
         self._by_id = {player.player_id: player for player in self.players}
@@ -1019,7 +1023,7 @@ class Game:
         return base_winner
 
     def _winning_players(self, winner: Faction | None) -> tuple[str, ...]:
-        """List seats whose actual film win condition matches the outcome."""
+        """List seats that satisfy faction and mode-specific survival conditions."""
         if winner is None:
             return ()
         if winner is Faction.FOX:
@@ -1040,7 +1044,19 @@ class Game:
                 for player in self.players
                 if player.role.faction is winner and player.lover_id is None
             ]
+        if self.config.role_preset != "classic":
+            winners = [player for player in winners if player.alive]
         return tuple(player.name for player in winners)
+
+    def _prize_shares(
+        self,
+        winning_players: tuple[str, ...],
+    ) -> tuple[tuple[str, float], ...]:
+        """Split a normalized movie prize pool equally among surviving winners."""
+        if self.config.role_preset == "classic" or not winning_players:
+            return ()
+        share = 1 / len(winning_players)
+        return tuple((name, share) for name in winning_players)
 
     def _finish(self, winner: Faction | None, reason: str) -> GameResult:
         self.phase = "finished"
@@ -1052,8 +1068,8 @@ class Game:
             outcome = self._t("妖狐独自获胜！", "The Fox wins alone!")
         elif winner is Faction.LOVERS:
             outcome = self._t(
-                "恋人与丘比特独占胜利！",
-                "The Lovers and Cupid win exclusively!",
+                "恋人阵营触发独占结算！",
+                "The Lovers trigger the exclusive outcome!",
             )
         else:
             outcome = self._t(
@@ -1067,21 +1083,46 @@ class Game:
         lover_pair = [player.name for player in self.players if player.lover_id]
         lover_reveal = (
             self._t(
-                f" 恋人：{'、'.join(lover_pair)}。",
-                f" Lovers: {' and '.join(lover_pair)}.",
+                f"恋人：{'、'.join(lover_pair)}。",
+                f"Lovers: {' and '.join(lover_pair)}.",
             )
             if lover_pair
             else ""
         )
         winning_players = self._winning_players(winner)
+        prize_shares = self._prize_shares(winning_players)
         winners_text = self._t(
             f"获胜玩家：{'、'.join(winning_players) if winning_players else '无'}。",
             f"Winning players: {', '.join(winning_players) if winning_players else 'none'}.",
         )
+        if prize_shares:
+            share_percent = f"{prize_shares[0][1] * 100:.2f}".rstrip("0").rstrip(".")
+            prize_text = self._t(
+                f"奖金分配：{len(prize_shares)} 名存活获胜者均分奖金池，每人 {share_percent}%。",
+                f"Prize split: {len(prize_shares)} surviving winners receive {share_percent}% each.",
+            )
+        elif self.config.role_preset != "classic" and winner is not None:
+            prize_text = self._t(
+                "阵营终局条件已经达成，但没有符合生存条件的获胜者，奖金无人领取。",
+                "A faction end condition was reached, but no eligible survivor can claim the prize.",
+            )
+        else:
+            prize_text = ""
+        roles_text = self._t(
+            f"全部身份：{reveal}。",
+            f"All roles: {reveal}.",
+        )
         self._announce(
-            self._t(
-                f"{outcome} {winners_text} 全部身份：{reveal}。{lover_reveal}",
-                f"{outcome} {winners_text} All roles: {reveal}.{lover_reveal}",
+            " ".join(
+                part
+                for part in (
+                    outcome,
+                    winners_text,
+                    prize_text,
+                    roles_text,
+                    lover_reveal,
+                )
+                if part
             ),
         )
         if self.config.memory_directory:
@@ -1089,6 +1130,7 @@ class Game:
         return GameResult(
             winner=winner,
             winning_players=winning_players,
+            prize_shares=prize_shares,
             days=self.day,
             survivors=tuple(player.name for player in self._alive()),
             reason=reason,

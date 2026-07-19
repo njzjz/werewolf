@@ -88,7 +88,10 @@ def fixed_config() -> GameConfig:
     return fixed_role_config(roles)
 
 
-def fixed_role_config(roles: list[Role]) -> GameConfig:
+def fixed_role_config(
+    roles: list[Role],
+    role_preset: str = "classic",
+) -> GameConfig:
     """Build a fixed-role bot table for focused role-resolution tests."""
     return GameConfig(
         language="zh-CN",
@@ -104,6 +107,7 @@ def fixed_role_config(roles: list[Role]) -> GameConfig:
         clear_screen=False,
         memory_directory=None,
         rules=RuleConfig(max_days=5),
+        role_preset=role_preset,
     )
 
 
@@ -204,6 +208,29 @@ def test_players_receive_global_and_role_specific_skills() -> None:
         }
         assert not skill_names & other_role_skills
 
+    movie_game = Game(
+        fixed_role_config(
+            [
+                Role.WEREWOLF,
+                Role.MADMAN,
+                Role.SEER,
+                Role.BODYGUARD,
+                Role.MADMAN,
+                Role.MADMAN,
+            ],
+            "movie_mad_land",
+        ),
+        terminal=SilentTerminal(),
+    )
+    assert all(
+        "global_movie_survival" in {skill.name for skill in player.skills}
+        for player in movie_game.players
+    )
+    assert all(
+        "global_movie_survival" not in {skill.name for skill in player.skills}
+        for player in game.players
+    )
+
 
 def test_madman_stays_out_of_wolf_chat_and_wins_with_werewolves() -> None:
     """Madmen appear village-side and share victory, but never wolf secrets."""
@@ -219,7 +246,7 @@ def test_madman_stays_out_of_wolf_chat_and_wins_with_werewolves() -> None:
         {ActionKind.SEER_INSPECT: [AgentResponse(choice="p2")]},
     )
     game = Game(
-        fixed_role_config(roles),
+        fixed_role_config(roles, "movie_prison_break"),
         controllers={"p3": seer},
         terminal=SilentTerminal(),
     )
@@ -243,6 +270,13 @@ def test_madman_stays_out_of_wolf_chat_and_wins_with_werewolves() -> None:
         "玩家1",
         "玩家2",
     )
+    assert game._prize_shares(("玩家1", "玩家2")) == (  # noqa: SLF001
+        ("玩家1", 0.5),
+        ("玩家2", 0.5),
+    )
+    game._by_id["p2"].alive = False  # noqa: SLF001
+    assert game._winning_players(Faction.WEREWOLF) == ("玩家1",)  # noqa: SLF001
+    assert game._prize_shares(("玩家1",)) == (("玩家1", 1.0),)  # noqa: SLF001
 
 
 def test_bodyguard_blocks_wolf_attack_and_cannot_protect_self() -> None:
@@ -265,7 +299,7 @@ def test_bodyguard_blocks_wolf_attack_and_cannot_protect_self() -> None:
         {ActionKind.SEER_INSPECT: [AgentResponse(choice="p1")]},
     )
     game = Game(
-        fixed_role_config(roles),
+        fixed_role_config(roles, "movie_basic"),
         controllers={"p1": wolf, "p2": bodyguard, "p3": seer},
         terminal=SilentTerminal(),
     )
@@ -328,7 +362,7 @@ def test_fox_survives_wolf_attack() -> None:
         {ActionKind.SEER_INSPECT: [AgentResponse(choice="p4")]},
     )
     game = Game(
-        fixed_role_config(roles),
+        fixed_role_config(roles, "movie_crazy_fox"),
         controllers={"p1": wolf, "p3": seer},
         terminal=SilentTerminal(),
     )
@@ -362,7 +396,7 @@ def test_fox_dies_when_inspected_and_overrides_base_winner_if_alive() -> None:
         {ActionKind.SEER_INSPECT: [AgentResponse(choice="p2")]},
     )
     game = Game(
-        fixed_role_config(roles),
+        fixed_role_config(roles, "movie_crazy_fox"),
         controllers={"p1": wolf, "p2": fox, "p3": seer},
         terminal=SilentTerminal(),
     )
@@ -377,7 +411,10 @@ def test_fox_dies_when_inspected_and_overrides_base_winner_if_alive() -> None:
         for event in game._by_id["p3"].memory.events  # noqa: SLF001
     )
 
-    survival_game = Game(fixed_role_config(roles), terminal=SilentTerminal())
+    survival_game = Game(
+        fixed_role_config(roles, "movie_crazy_fox"),
+        terminal=SilentTerminal(),
+    )
     survival_game._by_id["p1"].alive = False  # noqa: SLF001
     assert survival_game._winner() is Faction.FOX  # noqa: SLF001
     assert survival_game._winning_players(Faction.FOX) == ("玩家2",)  # noqa: SLF001
@@ -408,7 +445,7 @@ def lovers_game() -> tuple[Game, ScriptedController, ScriptedController]:
         {ActionKind.LOVER_CHAT: [AgentResponse(text="只给恋人看的预言家消息")]},
     )
     game = Game(
-        fixed_role_config(roles),
+        fixed_role_config(roles, "movie_lovers"),
         controllers={"p1": first_lover, "p2": cupid, "p3": second_lover},
         terminal=SilentTerminal(),
     )
@@ -444,7 +481,7 @@ def test_cupid_links_lovers_and_lovers_chat_without_leaking() -> None:
 
 
 def test_lover_dies_of_heartbreak_and_lovers_can_steal_the_endgame() -> None:
-    """A Lover death chains immediately; a surviving pair and Cupid win alone."""
+    """Lovers die together; only surviving members claim the exclusive result."""
     death_game, _, heartbroken_lover = lovers_game()
     death_game.day = 1
     death_game._apply_deaths(  # noqa: SLF001
@@ -469,9 +506,11 @@ def test_lover_dies_of_heartbreak_and_lovers_can_steal_the_endgame() -> None:
     assert win_game._winner() is Faction.LOVERS  # noqa: SLF001
     assert win_game._winning_players(Faction.LOVERS) == (  # noqa: SLF001
         "玩家1",
-        "玩家2",
         "玩家3",
     )
+    result = win_game._finish(Faction.LOVERS, "test")  # noqa: SLF001
+    assert result.winning_players == ("玩家1", "玩家3")
+    assert result.prize_shares == (("玩家1", 0.5), ("玩家3", 0.5))
 
 
 def test_shared_players_only_learn_each_other() -> None:
@@ -557,6 +596,7 @@ def test_offline_game_completes_and_exports_separate_memories(tmp_path: Path) ->
     result = game.run()
 
     assert result.winner in {Faction.GOOD, Faction.WEREWOLF, None}
+    assert result.prize_shares == ()
     assert result.days <= config.rules.max_days
     wolf_ids = {
         player.player_id for player in game.players if player.role is Role.WEREWOLF

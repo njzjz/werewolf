@@ -71,7 +71,8 @@ def main(argv: list[str] | None = None) -> None:
         winner = result.winner.value if result.winner else "draw"
         print(
             f"\n游戏结束：winner={winner}, winners={list(result.winning_players)}, "
-            f"days={result.days}, survivors={list(result.survivors)}",
+            f"prize_shares={dict(result.prize_shares)}, days={result.days}, "
+            f"survivors={list(result.survivors)}",
         )
     except KeyboardInterrupt:
         print("\n游戏已中止。", file=sys.stderr)
