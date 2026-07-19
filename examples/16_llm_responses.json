@@ -1,0 +1,147 @@
+{
+  "language": "zh-CN",
+  "seed": 20260719,
+  "clear_screen": false,
+  "memory_directory": "game_memories/16_llm_case",
+  "context_char_limit": 24000,
+  "providers": {
+    "responses": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "model": "your-model-id",
+      "wire_api": "responses",
+      "reasoning_effort": "low",
+      "use_json_mode": false,
+      "force_ipv4": false,
+      "timeout": 120,
+      "max_tokens": 500
+    }
+  },
+  "rules": {
+    "max_days": 20,
+    "wolf_chat_rounds": 1,
+    "witch_can_self_save": true,
+    "witch_can_use_two_potions_same_night": false,
+    "reveal_roles_on_death": false,
+    "allow_self_vote": false,
+    "last_words": true,
+    "first_night_last_words": true,
+    "night_death_last_words": false,
+    "day_vote_last_words": true,
+    "hunter_shot_last_words": false
+  },
+  "players": [
+    {
+      "name": "智能体01",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "冷静的逻辑分析者",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体02",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "敏锐的社交观察者",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体03",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "谨慎的证据派",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体04",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "善于复盘投票的玩家",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体05",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "发言简短直接的玩家",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体06",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "重视行为一致性的玩家",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体07",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "擅长提出反例的玩家",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体08",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "温和但立场坚定的玩家",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体09",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "善于捕捉矛盾的玩家",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体10",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "关注团队关系的玩家",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体11",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "喜欢建立嫌疑排序的玩家",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体12",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "敢于质疑共识的玩家",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体13",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "注重夜间信息推断的玩家",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体14",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "擅长总结局势的玩家",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体15",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "策略灵活的玩家",
+      "skills": ["logic", "social", "memory"]
+    },
+    {
+      "name": "智能体16",
+      "controller": "llm",
+      "provider": "responses",
+      "persona": "重视历史记忆的玩家",
+      "skills": ["logic", "social", "memory"]
+    }
+  ]
+}
