@@ -37,7 +37,7 @@ class LLMProviderConfig:
     api_key_env: str | None = None
     temperature: float = 0.7
     timeout: float = 120.0
-    max_tokens: int = 700
+    max_tokens: int = 2000
     use_json_mode: bool = True
     wire_api: str = "chat"
     reasoning_effort: str | None = None
@@ -102,11 +102,14 @@ class GameConfig:
     memory_directory: str | None = "game_memories"
     context_char_limit: int = 24000
     role_preset: str = "classic"
-    spectator_progress: bool = False
-    strict_controllers: bool = False
-    controller_retries: int = 0
+    spectator_progress: bool = True
+    strict_controllers: bool = True
+    controller_retries: int = 2
     public_transcript_path: str | None = None
     checkpoint_path: str | None = None
+    human_strategy_notes: bool = False
+    confirm_critical_actions: bool = True
+    parallel_llm_votes: bool = True
 
 
 def _provider_from_dict(raw: dict[str, Any]) -> LLMProviderConfig:
@@ -117,7 +120,7 @@ def _provider_from_dict(raw: dict[str, Any]) -> LLMProviderConfig:
         api_key_env=raw.get("api_key_env"),
         temperature=float(raw.get("temperature", 0.7)),
         timeout=float(raw.get("timeout", 120.0)),
-        max_tokens=int(raw.get("max_tokens", 700)),
+        max_tokens=int(raw.get("max_tokens", 2000)),
         use_json_mode=bool(raw.get("use_json_mode", True)),
         wire_api=str(raw.get("wire_api", "chat")),
         reasoning_effort=raw.get("reasoning_effort"),
@@ -161,9 +164,9 @@ def load_config(path: str | Path) -> GameConfig:
         memory_directory=raw.get("memory_directory", "game_memories"),
         context_char_limit=int(raw.get("context_char_limit", 24000)),
         role_preset=str(raw.get("role_preset", "classic")),
-        spectator_progress=bool(raw.get("spectator_progress", False)),
-        strict_controllers=bool(raw.get("strict_controllers", False)),
-        controller_retries=int(raw.get("controller_retries", 0)),
+        spectator_progress=bool(raw.get("spectator_progress", True)),
+        strict_controllers=bool(raw.get("strict_controllers", True)),
+        controller_retries=int(raw.get("controller_retries", 2)),
         public_transcript_path=(
             str(raw["public_transcript_path"])
             if raw.get("public_transcript_path") is not None
@@ -174,6 +177,9 @@ def load_config(path: str | Path) -> GameConfig:
             if raw.get("checkpoint_path") is not None
             else None
         ),
+        human_strategy_notes=bool(raw.get("human_strategy_notes", False)),
+        confirm_critical_actions=bool(raw.get("confirm_critical_actions", True)),
+        parallel_llm_votes=bool(raw.get("parallel_llm_votes", True)),
     )
     validate_config(config)
     return config
@@ -298,11 +304,14 @@ def example_config() -> dict[str, Any]:
         "memory_directory": "game_memories",
         "context_char_limit": 24000,
         "role_preset": "classic",
-        "spectator_progress": False,
-        "strict_controllers": False,
-        "controller_retries": 0,
-        "public_transcript_path": None,
-        "checkpoint_path": None,
+        "spectator_progress": True,
+        "strict_controllers": True,
+        "controller_retries": 2,
+        "public_transcript_path": "game_runs/public.log",
+        "checkpoint_path": "game_runs/private.checkpoint.json",
+        "human_strategy_notes": False,
+        "confirm_critical_actions": True,
+        "parallel_llm_votes": True,
         "providers": {
             "default": {
                 "base_url": "https://api.openai.com/v1",
@@ -310,7 +319,7 @@ def example_config() -> dict[str, Any]:
                 "model": "gpt-4.1-mini",
                 "temperature": 0.7,
                 "timeout": 120,
-                "max_tokens": 700,
+                "max_tokens": 2000,
                 "use_json_mode": True,
                 "wire_api": "chat",
                 "stream": False,
@@ -358,6 +367,7 @@ def demo_config(
         clear_screen=False,
         memory_directory=None,
         role_preset=role_preset,
+        spectator_progress=False,
     )
     validate_config(config)
     return config

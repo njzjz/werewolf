@@ -8,8 +8,9 @@ import re
 import threading
 import time
 from collections import Counter
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,6 +21,7 @@ from .agents import (
     HumanController,
     LLMController,
     OpenAICompatibleClient,
+    SafeFallbackController,
     Terminal,
 )
 from .boundary import InformationBoundary
@@ -74,6 +76,35 @@ class GameResult:
     days: int
     survivors: tuple[str, ...]
     reason: str
+    duration_seconds: float
+    controller_actions: int
+    controller_attempts: int
+    controller_failures: int
+    controller_retries: int
+    controller_fallbacks: int
+    seat_labels: tuple[tuple[str, str], ...]
+
+
+@dataclass
+class ControllerMetrics:
+    """Aggregate LLM-controller reliability counters for one recoverable match."""
+
+    actions: int = 0
+    attempts: int = 0
+    failures: int = 0
+    retries: int = 0
+    fallbacks: int = 0
+
+
+@dataclass(frozen=True)
+class FallbackRecord:
+    """One controller fallback retained for transparent end-of-game reporting."""
+
+    day: int
+    phase: str
+    player_name: str
+    action_kind: str
+    error: str
 
 
 MOVIE_ROLE_DECKS: dict[str, tuple[Role, ...]] = {
@@ -183,6 +214,11 @@ class Game:
         self._checkpoint_base_payload: dict[str, object] | None = None
         self._action_journal: list[dict[str, object]] = []
         self._action_cursor = 0
+        self._started_at = time.monotonic()
+        self._controller_metrics = ControllerMetrics()
+        self._state_lock = threading.RLock()
+        self._fallback_records: list[FallbackRecord] = []
+        self._last_nonterminal_snapshot: dict[str, object] | None = None
         self.day = 0
         self.phase = "setup"
         self._antidote_available = True
@@ -191,6 +227,8 @@ class Game:
 
         seats = self._ordered_seats(resume_checkpoint)
         self._seat_configs = tuple(seats)
+        self._human_count = sum(seat.controller == "human" for seat in seats)
+        self._controller_kinds: dict[str, str] = {}
         roles = self._roles(seats)
         self.players: list[PlayerState] = []
         for index, (seat, role) in enumerate(zip(seats, roles), start=1):
@@ -204,6 +242,7 @@ class Game:
                 controllers or {},
             )
             skills = resolve_player_skills(role, list(seat.skills))
+            self._controller_kinds[player_id] = seat.controller
             if config.role_preset != "classic":
                 skills = add_movie_survival_skill(skills)
             skills = add_preset_skill(skills, config.role_preset)
@@ -214,6 +253,7 @@ class Game:
                     role=role,
                     controller=controller,
                     skills=skills,
+                    seat_number=index,
                 ),
             )
         self._by_id = {player.player_id: player for player in self.players}
@@ -260,6 +300,10 @@ class Game:
             "antidote_available": self._antidote_available,
             "poison_available": self._poison_available,
             "last_exiled_id": self._last_exiled_id,
+            "elapsed_seconds": time.monotonic() - self._started_at,
+            "controller_metrics": asdict(self._controller_metrics),
+            "fallback_records": [asdict(item) for item in self._fallback_records],
+            "last_nonterminal_snapshot": self._last_nonterminal_snapshot,
             "rng_state": [rng_state[0], list(rng_state[1]), rng_state[2]],
             "transcript": {
                 "path": transcript_path,
@@ -378,6 +422,38 @@ class Game:
         self._antidote_available = bool(raw["antidote_available"])
         self._poison_available = bool(raw["poison_available"])
         self._last_exiled_id = raw.get("last_exiled_id")
+        self._started_at = time.monotonic() - float(raw.get("elapsed_seconds", 0.0))
+        metrics = raw.get("controller_metrics", {})
+        if not isinstance(metrics, dict):
+            msg = "Checkpoint controller metrics are malformed"
+            raise TypeError(msg)
+        self._controller_metrics = ControllerMetrics(
+            actions=int(metrics.get("actions", 0)),
+            attempts=int(metrics.get("attempts", 0)),
+            failures=int(metrics.get("failures", 0)),
+            retries=int(metrics.get("retries", 0)),
+            fallbacks=int(metrics.get("fallbacks", 0)),
+        )
+        fallback_records = raw.get("fallback_records", [])
+        if not isinstance(fallback_records, list) or not all(
+            isinstance(item, dict) for item in fallback_records
+        ):
+            msg = "Checkpoint fallback records are malformed"
+            raise ValueError(msg)
+        self._fallback_records = [
+            FallbackRecord(
+                day=int(item["day"]),
+                phase=str(item["phase"]),
+                player_name=str(item["player_name"]),
+                action_kind=str(item["action_kind"]),
+                error=str(item["error"]),
+            )
+            for item in fallback_records
+        ]
+        snapshot = raw.get("last_nonterminal_snapshot")
+        self._last_nonterminal_snapshot = (
+            snapshot if isinstance(snapshot, dict) else None
+        )
         rng_state = raw["rng_state"]
         self.rng.setstate((int(rng_state[0]), tuple(rng_state[1]), rng_state[2]))
         transcript = raw.get("transcript", {})
@@ -457,7 +533,12 @@ class Game:
         if player_id in overrides:
             return overrides[player_id]
         if kind == "human":
-            return HumanController(self.terminal)
+            return HumanController(
+                self.terminal,
+                require_handoff=self._human_count > 1,
+                ask_strategy_note=self.config.human_strategy_notes,
+                confirm_critical_actions=self.config.confirm_critical_actions,
+            )
         if kind == "bot":
             return BotController(self.rng)
         if not provider_name:
@@ -472,6 +553,7 @@ class Game:
 
     def run(self) -> GameResult:
         """Run until one faction wins or the configured day cap is reached."""
+        self._show_preflight_notices()
         if self._resume_step is None:
             next_day = 0
             next_step = "setup"
@@ -482,6 +564,7 @@ class Game:
         if next_step == "setup":
             self.day = 0
             self._setup()
+            self._record_nonterminal_snapshot("setup")
             next_day = 1
             next_step = "night"
             self._save_checkpoint(next_day=next_day, next_step=next_step)
@@ -492,6 +575,7 @@ class Game:
                 winner = self._winner()
                 if winner is not None:
                     return self._finish(winner, "night_resolution")
+                self._record_nonterminal_snapshot("night_resolution")
                 next_step = "daytime"
                 self._save_checkpoint(next_day=day, next_step=next_step)
             if next_step == "daytime":
@@ -499,13 +583,63 @@ class Game:
                 winner = self._winner()
                 if winner is not None:
                     return self._finish(winner, "day_vote")
+                self._record_nonterminal_snapshot("day_vote")
                 next_step = "night"
                 self._save_checkpoint(next_day=day + 1, next_step=next_step)
         return self._finish(None, "max_days")
 
+    def _show_preflight_notices(self) -> None:
+        """Warn about configurations that made live testing opaque or unrecoverable."""
+        if not any(kind == "llm" for kind in self._controller_kinds.values()):
+            return
+        notices: list[str] = []
+        if not self.config.spectator_progress:
+            notices.append(
+                self._t(
+                    "未开启安全进度；模型调用期间终端可能长时间无输出。",
+                    "Safe progress is disabled; the terminal may be silent during model calls.",
+                ),
+            )
+        if not self.config.strict_controllers:
+            notices.append(
+                self._t(
+                    "已允许系统安全后备；本局若发生降级将不计为完整 LLM 对局。",
+                    "System safe fallback is enabled; any degraded action makes this an incomplete LLM match.",
+                ),
+            )
+        if self._checkpoint_path is None:
+            notices.append(
+                self._t(
+                    "未配置私密恢复点；中止后无法继续当前对局。",
+                    "No private checkpoint is configured; an interrupted match cannot be resumed.",
+                ),
+            )
+        providers = [
+            self.config.providers[seat.provider]
+            for seat in self._seat_configs
+            if seat.controller == "llm" and seat.provider in self.config.providers
+        ]
+        if any(provider.reasoning_effort == "xhigh" for provider in providers):
+            notices.append(
+                self._t(
+                    "检测到 xhigh 推理强度；实时对局延迟可能显著增加，通常建议使用 high。",
+                    "xhigh reasoning is configured; live-game latency may be high, and high is usually preferable.",
+                ),
+            )
+        if any(provider.max_tokens > 5000 for provider in providers):
+            notices.append(
+                self._t(
+                    "检测到单次输出上限超过 5000 token；狼人杀动作通常无需如此大的预算。",
+                    "A per-action output limit above 5000 tokens was detected; Werewolf actions rarely need that budget.",
+                ),
+            )
+        label = self._t("提示", "Notice")
+        for notice in notices:
+            self.terminal.notice(notice, label=label)
+
     def _setup(self) -> None:
         self.phase = "setup"
-        seats = "、".join(player.name for player in self.players)
+        seats = "、".join(self._player_label(player) for player in self.players)
         composition = Counter(player.role for player in self.players)
         role_names = localized(ROLE_NAMES, self.config.language)
         role_summary = "，".join(
@@ -523,7 +657,9 @@ class Game:
             ),
         )
         wolf_ids = self._wolf_ids(alive_only=False)
-        wolf_names = "、".join(self._by_id[player_id].name for player_id in wolf_ids)
+        wolf_names = "、".join(
+            self._player_label(self._by_id[player_id]) for player_id in wolf_ids
+        )
         for player in self.players:
             role_name = role_names[player.role]
             description = localized(ROLE_DESCRIPTIONS, self.config.language)[
@@ -557,8 +693,12 @@ class Game:
                     with suppress(EOFError):
                         input(
                             self._t(
-                                "记住身份后按回车交接终端……",
-                                "Memorize your role, then press Enter...",
+                                "记住身份后按回车交接终端……"
+                                if self._human_count > 1
+                                else "记住身份后按回车开始游戏……",
+                                "Memorize your role, then pass the terminal..."
+                                if self._human_count > 1
+                                else "Memorize your role, then press Enter to begin...",
                             ),
                         )
                     self.terminal.clear()
@@ -577,8 +717,8 @@ class Game:
             phase=self.phase,
             recipient=first.player_id,
             text=self._t(
-                f"另一名共有者是 {second.name}。",
-                f"The other Shared Player is {second.name}.",
+                f"另一名共有者是 {self._player_label(second)}。",
+                f"The other Shared Player is {self._player_label(second)}.",
             ),
         )
         self.boundary.private(
@@ -586,8 +726,8 @@ class Game:
             phase=self.phase,
             recipient=second.player_id,
             text=self._t(
-                f"另一名共有者是 {first.name}。",
-                f"The other Shared Player is {first.name}.",
+                f"另一名共有者是 {self._player_label(first)}。",
+                f"The other Shared Player is {self._player_label(first)}.",
             ),
         )
 
@@ -637,8 +777,8 @@ class Game:
         first.skills = add_lover_skill(first.skills)
         second.skills = add_lover_skill(second.skills)
         lover_names = self._t(
-            f"{first.name}、{second.name}",
-            f"{first.name} and {second.name}",
+            f"{self._player_label(first)}、{self._player_label(second)}",
+            f"{self._player_label(first)} and {self._player_label(second)}",
         )
         self.boundary.private(
             day=0,
@@ -686,7 +826,9 @@ class Game:
         if poisoned:
             deaths.setdefault(poisoned, set()).add(DeathCause.POISON)
         if deaths:
-            names = "、".join(self._by_id[player_id].name for player_id in deaths)
+            names = "、".join(
+                self._player_label(self._by_id[player_id]) for player_id in deaths
+            )
             self._apply_deaths(
                 deaths,
                 self._t(
@@ -721,8 +863,8 @@ class Game:
             phase=self.phase,
             recipient=medium.player_id,
             text=self._t(
-                f"灵媒结果：昨日被放逐的 {target.name} 显示为【{alignment}】。",
-                f"Medium result: yesterday's exile {target.name} appears {alignment}.",
+                f"灵媒结果：昨日被放逐的 {self._player_label(target)} 显示为【{alignment}】。",
+                f"Medium result: yesterday's exile {self._player_label(target)} appears {alignment}.",
             ),
         )
 
@@ -749,7 +891,7 @@ class Game:
                     phase=self.phase,
                     recipients=recipients,
                     sender=lover.name,
-                    text=f"{lover.name}：{response.text.strip()}",
+                    text=f"{self._player_label(lover)}：{response.text.strip()}",
                 )
 
     def _bodyguard_turn(self) -> str | None:
@@ -799,7 +941,7 @@ class Game:
                         phase=self.phase,
                         recipients=recipients,
                         sender=wolf.name,
-                        text=f"{wolf.name}：{response.text.strip()}",
+                        text=f"{self._player_label(wolf)}：{response.text.strip()}",
                     )
         candidates = [
             player for player in self._alive() if player.role is not Role.WEREWOLF
@@ -822,7 +964,11 @@ class Game:
             if response.choice:
                 votes.append(response.choice)
         target = self._plurality(votes)
-        target_name = self._by_id[target].name if target else self._t("无人", "nobody")
+        target_name = (
+            self._player_label(self._by_id[target])
+            if target
+            else self._t("无人", "nobody")
+        )
         self.boundary.werewolves(
             day=self.day,
             phase=self.phase,
@@ -863,8 +1009,8 @@ class Game:
                 phase=self.phase,
                 recipient=seer.player_id,
                 text=self._t(
-                    f"查验结果：{target.name} 属于【{faction}】。",
-                    f"Inspection: {target.name} belongs to the {faction}.",
+                    f"查验结果：{self._player_label(target)} 属于【{faction}】。",
+                    f"Inspection: {self._player_label(target)} belongs to the {faction}.",
                 ),
             )
             if target.role is Role.FOX:
@@ -878,7 +1024,11 @@ class Game:
         )
         if not witch:
             return False, None
-        victim_name = self._by_id[victim].name if victim else self._t("无人", "nobody")
+        victim_name = (
+            self._player_label(self._by_id[victim])
+            if victim
+            else self._t("无人", "nobody")
+        )
         self.boundary.private(
             day=self.day,
             phase=self.phase,
@@ -936,7 +1086,9 @@ class Game:
     def _daytime(self) -> None:
         self.phase = "discussion"
         speakers = self._discussion_order()
-        start_name = speakers[0].name if speakers else self._t("无人", "nobody")
+        start_name = (
+            self._player_label(speakers[0]) if speakers else self._t("无人", "nobody")
+        )
         self._announce(
             self._t(
                 f"第 {self.day} 天，开始公开讨论。本日从 {start_name} 起按座位顺序发言。",
@@ -955,7 +1107,7 @@ class Game:
                 "（保持沉默）",
                 "(remains silent)",
             )
-            self._say(player, speech)
+            self._say(player, speech, fallback=response.used_fallback)
         self.phase = "vote"
         votes = self._collect_votes(None)
         leaders = self._vote_leaders(votes)
@@ -968,7 +1120,9 @@ class Game:
             )
             return
         if len(leaders) > 1:
-            names = "、".join(self._by_id[player_id].name for player_id in leaders)
+            names = "、".join(
+                self._player_label(self._by_id[player_id]) for player_id in leaders
+            )
             self._announce(
                 self._t(
                     f"出现平票：{names}。平票玩家依次辩解。",
@@ -990,6 +1144,7 @@ class Game:
                 self._say(
                     player,
                     response.text.strip() or self._t("（放弃辩解）", "(no defense)"),
+                    fallback=response.used_fallback,
                 )
             votes = self._collect_votes(set(leaders), runoff=True)
             leaders = self._vote_leaders(votes)
@@ -1002,7 +1157,7 @@ class Game:
                 )
                 return
         target = leaders[0]
-        target_name = self._by_id[target].name
+        target_name = self._player_label(self._by_id[target])
         # The Medium reports only the player directly exiled by the vote; a
         # Lover who follows by heartbreak was not the day's exile.
         self._last_exiled_id = target
@@ -1029,7 +1184,9 @@ class Game:
         runoff: bool = False,
     ) -> dict[str, str | None]:
         votes: dict[str, str | None] = {}
+        fallback_voters: set[str] = set()
         alive = list(self._alive())
+        actions: list[tuple[PlayerState, ActionRequest]] = []
         for voter in alive:
             candidates = [
                 player
@@ -1037,25 +1194,32 @@ class Game:
                 if (candidate_ids is None or player.player_id in candidate_ids)
                 and (self.config.rules.allow_self_vote or player is not voter)
             ]
-            response = self._act(
-                voter,
-                ActionRequest(
-                    ActionKind.VOTE,
-                    self._t(
-                        "平票重投：请选择放逐对象。"
-                        if runoff
-                        else "请选择今天要放逐的玩家。",
-                        "Runoff: choose whom to eliminate."
-                        if runoff
-                        else "Choose whom to eliminate today.",
+            actions.append(
+                (
+                    voter,
+                    ActionRequest(
+                        ActionKind.VOTE,
+                        self._t(
+                            "平票重投：请选择放逐对象。"
+                            if runoff
+                            else "请选择今天要放逐的玩家。",
+                            "Runoff: choose whom to eliminate."
+                            if runoff
+                            else "Choose whom to eliminate today.",
+                        ),
+                        self._options(candidates),
+                        allow_abstain=True,
                     ),
-                    self._options(candidates),
-                    allow_abstain=True,
                 ),
             )
+        responses = self._act_independent(actions)
+        for (voter, _), response in zip(actions, responses):
             votes[voter.player_id] = response.choice
+            if response.used_fallback:
+                fallback_voters.add(voter.player_id)
         vote_text = "；".join(
-            f"{self._by_id[voter].name}→{self._by_id[target].name if target else self._t('弃权', 'abstain')}"
+            f"{self._player_label(self._by_id[voter])}{self._t('（后备）', ' (fallback)') if voter in fallback_voters else ''}"
+            f"→{self._player_label(self._by_id[target]) if target else self._t('弃权', 'abstain')}"
             for voter, target in votes.items()
         )
         self._announce(
@@ -1096,8 +1260,8 @@ class Game:
                 self._announce(
                     self._with_role_reveal(
                         self._t(
-                            f"{player.name} 死亡，恋人 {partner.name} 随之殉情。",
-                            f"{player.name} died; their Lover {partner.name} dies of heartbreak.",
+                            f"{self._player_label(player)} 死亡，恋人 {self._player_label(partner)} 随之殉情。",
+                            f"{self._player_label(player)} died; their Lover {self._player_label(partner)} dies of heartbreak.",
                         ),
                         [(partner, heartbreak_causes)],
                     ),
@@ -1115,7 +1279,11 @@ class Game:
                     ),
                 )
                 if response.text.strip():
-                    self._say(player, response.text.strip())
+                    self._say(
+                        player,
+                        response.text.strip(),
+                        fallback=response.used_fallback,
+                    )
             if player.role is not Role.HUNTER or DeathCause.POISON in causes:
                 continue
             candidates = list(self._alive())
@@ -1138,8 +1306,8 @@ class Game:
                     self._announce(
                         self._with_role_reveal(
                             self._t(
-                                f"{player.name} 发动猎人技能，{victim.name} 被带走。",
-                                f"{player.name} uses the Hunter skill and takes down {victim.name}.",
+                                f"{self._player_label(player)} 发动猎人技能，{self._player_label(victim)} 被带走。",
+                                f"{self._player_label(player)} uses the Hunter skill and takes down {self._player_label(victim)}.",
                             ),
                             [(victim, {DeathCause.HUNTER})],
                         ),
@@ -1156,7 +1324,8 @@ class Game:
             return announcement
         role_names = localized(ROLE_NAMES, self.config.language)
         reveal = "；".join(
-            f"{player.name}={role_names[player.role]}" for player, _ in deaths
+            f"{self._player_label(player)}={role_names[player.role]}"
+            for player, _ in deaths
         )
         return announcement + self._t(f" 身份公开：{reveal}。", f" Roles: {reveal}.")
 
@@ -1217,6 +1386,102 @@ class Game:
         player.memory.reflect(self.day, self.phase, private_note)
         return response
 
+    def _act_independent(
+        self,
+        actions: list[tuple[PlayerState, ActionRequest]],
+    ) -> list[AgentResponse]:
+        """Run mutually invisible LLM choices concurrently and journal in seat order.
+
+        Public votes are revealed only after every choice is collected, so LLM
+        voters cannot observe one another and may safely run in parallel. Human
+        and local-bot inputs are collected before network work begins to avoid
+        progress output interrupting an interactive prompt.
+        """
+        if not self.config.parallel_llm_votes:
+            return [self._act(player, request) for player, request in actions]
+
+        responses: list[AgentResponse | None] = [None] * len(actions)
+        replayed: set[int] = set()
+        pending: list[int] = []
+        for index, (player, request) in enumerate(actions):
+            response = self._replay_action(player, request)
+            if response is not None:
+                responses[index] = response
+                replayed.add(index)
+            elif self._controller_kinds.get(player.player_id) == "llm":
+                pending.append(index)
+            else:
+                responses[index] = self._controller_action(player, request)
+
+        futures: dict[int, Future[AgentResponse]] = {}
+        heartbeat_stop = threading.Event()
+        heartbeat: threading.Thread | None = None
+        if pending:
+            if self.config.spectator_progress:
+                self.terminal.progress(
+                    self._t(
+                        f"正在并行收集 {len(pending)} 个互不可见的 LLM 投票……",
+                        f"Collecting {len(pending)} mutually invisible LLM votes in parallel...",
+                    ),
+                )
+            executor = ThreadPoolExecutor(max_workers=len(pending))
+            for index in pending:
+                player, request = actions[index]
+                futures[index] = executor.submit(
+                    self._controller_action,
+                    player,
+                    request,
+                )
+            if self.config.spectator_progress:
+                heartbeat = threading.Thread(
+                    target=self._parallel_vote_heartbeat,
+                    args=(heartbeat_stop, tuple(futures.values())),
+                    daemon=True,
+                )
+                heartbeat.start()
+        else:
+            executor = None
+
+        try:
+            for index, (player, request) in enumerate(actions):
+                if index in futures:
+                    responses[index] = futures[index].result()
+                response = responses[index]
+                if response is None:
+                    msg = "Independent controller batch produced no response"
+                    raise RuntimeError(msg)
+                if index not in replayed:
+                    self._record_action(player, request, response)
+                private_note = "\n".join(
+                    part for part in (response.thought, response.note) if part.strip()
+                )
+                player.memory.reflect(self.day, self.phase, private_note)
+        finally:
+            heartbeat_stop.set()
+            if heartbeat is not None:
+                heartbeat.join(timeout=1)
+                self.terminal.clear_transient_progress()
+            if executor is not None:
+                executor.shutdown(wait=True)
+        return [response for response in responses if response is not None]
+
+    def _parallel_vote_heartbeat(
+        self,
+        stop: threading.Event,
+        futures: tuple[Future[AgentResponse], ...],
+    ) -> None:
+        """Show aggregate parallel-vote progress without exposing choices."""
+        started = time.monotonic()
+        while not stop.wait(1):
+            completed = sum(future.done() for future in futures)
+            elapsed = int(time.monotonic() - started)
+            self.terminal.transient_progress(
+                self._t(
+                    f"并行投票处理中：{completed}/{len(futures)} 完成，已用 {elapsed} 秒",
+                    f"Parallel votes: {completed}/{len(futures)} complete after {elapsed}s",
+                ),
+            )
+
     def _action_signature(
         self,
         player: PlayerState,
@@ -1260,6 +1525,9 @@ class Game:
             text=str(response.get("text", "")),
             thought=str(response.get("thought", "")),
             note=str(response.get("note", "")),
+            used_fallback=bool(response.get("used_fallback", False)),
+            fallback_error=str(response.get("fallback_error", "")),
+            attempts=int(response.get("attempts", 1)),
         )
 
     def _record_action(
@@ -1280,6 +1548,10 @@ class Game:
         payload = {
             **self._checkpoint_base_payload,
             "action_journal": self._action_journal,
+            "controller_metrics": asdict(self._controller_metrics),
+            "fallback_records": [asdict(item) for item in self._fallback_records],
+            "last_nonterminal_snapshot": self._last_nonterminal_snapshot,
+            "elapsed_seconds": time.monotonic() - self._started_at,
         }
         self._checkpoint_base_payload = payload
         self._write_checkpoint(payload)
@@ -1290,31 +1562,44 @@ class Game:
         request: ActionRequest,
     ) -> AgentResponse:
         """Call one controller with bounded retries and validated choices."""
+        is_llm = self._controller_kinds.get(player.player_id) == "llm"
+        if is_llm:
+            self._increment_metric("actions")
+        last_error = ""
         for attempt in range(self.config.controller_retries + 1):
+            if is_llm:
+                self._increment_metric("attempts")
             try:
                 response = player.controller.act(self._view(player), request)
             except (EOFError, KeyboardInterrupt):
                 raise
             except Exception as exc:
+                last_error = self._short_error(f"{type(exc).__name__}: {exc}")
+                if is_llm:
+                    self._increment_metric("failures")
                 if attempt < self.config.controller_retries:
+                    if is_llm:
+                        self._increment_metric("retries")
                     self._announce_controller_retry(attempt + 1)
                     continue
                 if self.config.strict_controllers:
-                    msg = (
-                        f"Controller failed for {player.name} during "
-                        f"{request.kind.value}: {type(exc).__name__}: {exc}"
+                    msg = self._strict_controller_error(
+                        player,
+                        request,
+                        last_error,
                     )
                     raise RuntimeError(msg) from exc
-                self.boundary.private(
-                    day=self.day,
-                    phase=self.phase,
-                    recipient=player.player_id,
-                    text=self._t(
-                        f"控制器调用失败，法官启用本地后备动作：{type(exc).__name__}: {exc}",
-                        f"Controller failed; judge used a local fallback: {type(exc).__name__}: {exc}",
-                    ),
-                )
-                return BotController(self.rng).act(self._view(player), request)
+                with self._state_lock:
+                    self.boundary.private(
+                        day=self.day,
+                        phase=self.phase,
+                        recipient=player.player_id,
+                        text=self._t(
+                            f"控制器调用失败，法官启用系统安全后备：{last_error}",
+                            f"Controller failed; judge used the system safe fallback: {last_error}",
+                        ),
+                    )
+                return self._safe_fallback(player, request, last_error, attempt + 1)
 
             legal = {option.value for option in request.options}
             illegal = bool(
@@ -1323,34 +1608,118 @@ class Game:
                 and (response.choice is not None or not request.allow_abstain)
             )
             if not illegal:
-                return response
+                return replace(response, attempts=attempt + 1)
+            last_error = self._short_error(
+                f"Illegal choice for {request.kind.value}: {response.choice!r}",
+            )
+            if is_llm:
+                self._increment_metric("failures")
             if attempt < self.config.controller_retries:
+                if is_llm:
+                    self._increment_metric("retries")
                 self._announce_controller_retry(attempt + 1)
                 continue
             if self.config.strict_controllers:
-                msg = (
-                    f"Controller returned an illegal choice for {player.name} "
-                    f"during {request.kind.value}: {response.choice!r}"
+                msg = self._strict_controller_error(
+                    player,
+                    request,
+                    f"illegal choice {response.choice!r}",
                 )
                 raise RuntimeError(msg)
-            self.boundary.private(
-                day=self.day,
-                phase=self.phase,
-                recipient=player.player_id,
-                text=self._t(
-                    "提交了非法选项，法官改用合法后备动作。",
-                    "Illegal option; judge selected a legal fallback.",
-                ),
-            )
-            fallback = BotController(self.rng).act(self._view(player), request)
-            return AgentResponse(
-                choice=fallback.choice,
-                text=response.text,
-                thought=response.thought,
-                note=response.note,
-            )
+            with self._state_lock:
+                self.boundary.private(
+                    day=self.day,
+                    phase=self.phase,
+                    recipient=player.player_id,
+                    text=self._t(
+                        "提交了非法选项，法官改用系统安全后备。",
+                        "Illegal option; judge selected the system safe fallback.",
+                    ),
+                )
+            return self._safe_fallback(player, request, last_error, attempt + 1)
         msg = "Controller retry loop ended without a response"
         raise RuntimeError(msg)
+
+    def _strict_controller_error(
+        self,
+        player: PlayerState,
+        request: ActionRequest,
+        detail: str,
+    ) -> str:
+        """Keep private actors and abilities out of resumable terminal errors."""
+        public_kinds = {ActionKind.SPEAK, ActionKind.LAST_WORDS, ActionKind.VOTE}
+        if request.kind in public_kinds:
+            return (
+                f"Controller failed for {self._player_label(player)} during "
+                f"{request.kind.value}: {detail}"
+            )
+        category = (
+            "invalid response"
+            if detail.lower().startswith("illegal choice")
+            else detail.split(":", maxsplit=1)[0]
+        )
+        return f"Controller failed during a private action ({category}); private details were not printed."
+
+    @staticmethod
+    def _short_error(detail: str, limit: int = 500) -> str:
+        """Bound provider diagnostics before persisting or printing them."""
+        clean = " ".join(detail.split())
+        return clean if len(clean) <= limit else clean[: limit - 1] + "…"
+
+    def _safe_fallback(
+        self,
+        player: PlayerState,
+        request: ActionRequest,
+        error: str,
+        attempts: int,
+    ) -> AgentResponse:
+        """Apply a conservative, visible fallback only in explicitly casual games."""
+        if self._controller_kinds.get(player.player_id) == "llm":
+            self._increment_metric("fallbacks")
+        record = FallbackRecord(
+            day=self.day,
+            phase=self.phase,
+            player_name=self._player_label(player),
+            action_kind=request.kind.value,
+            error=error,
+        )
+        with self._state_lock:
+            self._fallback_records.append(record)
+        self._announce_controller_fallback(player, request)
+        fallback = SafeFallbackController().act(self._view(player), request)
+        return replace(
+            fallback,
+            used_fallback=True,
+            fallback_error=error,
+            attempts=attempts,
+        )
+
+    def _increment_metric(self, name: str) -> None:
+        """Update one controller metric safely during parallel vote requests."""
+        with self._state_lock:
+            value = getattr(self._controller_metrics, name)
+            setattr(self._controller_metrics, name, value + 1)
+
+    def _announce_controller_fallback(
+        self,
+        player: PlayerState,
+        request: ActionRequest,
+    ) -> None:
+        """Expose degradation without leaking the actor behind a private action."""
+        if not self.config.spectator_progress:
+            return
+        public_kinds = {ActionKind.SPEAK, ActionKind.LAST_WORDS, ActionKind.VOTE}
+        if request.kind in public_kinds:
+            text = self._t(
+                f"{self._player_label(player)} 的公开动作已使用系统安全后备。",
+                f"{self._player_label(player)} used the system safe fallback for a public action.",
+            )
+        else:
+            text = self._t(
+                "一项私密行动的控制器不可用，已使用系统安全后备；具体参与者将在终局披露。",
+                "A private controller action used the system safe fallback; the actor will be disclosed after the game.",
+            )
+        self.terminal.progress(text)
 
     def _announce_controller_retry(self, retry_number: int) -> None:
         """Expose a technical retry without identifying a private actor."""
@@ -1383,18 +1752,18 @@ class Game:
         """Describe action progress without revealing role identities or targets."""
         if request.kind is ActionKind.SPEAK:
             return self._t(
-                f"{player.name} 正在组织公开发言……",
-                f"{player.name} is preparing a public statement...",
+                f"{self._player_label(player)} 正在组织公开发言……",
+                f"{self._player_label(player)} is preparing a public statement...",
             )
         if request.kind is ActionKind.LAST_WORDS:
             return self._t(
-                f"{player.name} 正在组织遗言……",
-                f"{player.name} is preparing final words...",
+                f"{self._player_label(player)} 正在组织遗言……",
+                f"{self._player_label(player)} is preparing final words...",
             )
         if request.kind is ActionKind.VOTE:
             return self._t(
-                f"{player.name} 正在提交公开投票……",
-                f"{player.name} is submitting a public vote...",
+                f"{self._player_label(player)} 正在提交公开投票……",
+                f"{self._player_label(player)} is submitting a public vote...",
             )
         if self.phase == "setup":
             return self._t(
@@ -1436,21 +1805,83 @@ class Game:
             day=self.day,
             phase=self.phase,
             language=self.config.language,
+            seat_number=player.seat_number,
+            seat_players=tuple(
+                (item.player_id, item.seat_number, item.name) for item in self.players
+            ),
+            mechanical_context=self._mechanical_context(),
+        )
+
+    def _record_nonterminal_snapshot(self, reason: str) -> None:
+        """Remember the latest public state that passed an immediate win check."""
+        alive = self._alive()
+        self._last_nonterminal_snapshot = {
+            "day": self.day,
+            "phase": self.phase,
+            "reason": reason,
+            "alive_count": len(alive),
+            "alive_ids": [player.player_id for player in alive],
+            "max_wolves": max(0, (len(alive) - 1) // 2),
+        }
+
+    def _mechanical_context(self) -> str:
+        """Render a public parity constraint from the last completed win check."""
+        snapshot = self._last_nonterminal_snapshot
+        if not snapshot:
+            return ""
+        alive_count = int(snapshot["alive_count"])
+        max_wolves = int(snapshot["max_wolves"])
+        day = int(snapshot["day"])
+        alive_ids = snapshot.get("alive_ids", [])
+        alive_labels = [
+            self._player_label(self._by_id[player_id])
+            for player_id in alive_ids
+            if isinstance(player_id, str) and player_id in self._by_id
+        ]
+        english_roster = f" ({', '.join(alive_labels)})" if alive_labels else ""
+        chinese_roster = f"（{'、'.join(alive_labels)}）" if alive_labels else ""
+        if self.config.language == "en":
+            return (
+                f"Last completed win check: Day {day}, {alive_count} players were alive "
+                f"and the game continued, so at most {max_wolves} living werewolves "
+                f"were possible in that exact snapshot{english_roster}. "
+                "Any claimed role world must "
+                "respect this deterministic parity fact."
+            )
+        return (
+            f"最近一次已完成的胜负检查：第 {day} 天有 {alive_count} 人存活且游戏继续，"
+            f"因此该时点至多有 {max_wolves} 名存活狼人{chinese_roster}。"
+            "任何身份组合都必须符合这条"
+            "确定性的即时胜负约束。"
         )
 
     def _announce(self, text: str) -> None:
         self.boundary.public(day=self.day, phase=self.phase, text=text)
         self.terminal.announce(text)
 
-    def _say(self, player: PlayerState, text: str) -> None:
-        rendered = f"{player.name}：{text}"
+    def _say(
+        self,
+        player: PlayerState,
+        text: str,
+        *,
+        fallback: bool = False,
+    ) -> None:
+        label = self._player_label(player)
+        fallback_marker = self._t("【系统安全后备】", "[system safe fallback]")
+        rendered = f"{label}{fallback_marker if fallback else ''}：{text}"
         self.boundary.public(
             day=self.day,
             phase=self.phase,
             text=rendered,
-            sender=player.name,
+            sender=label,
         )
-        self.terminal.say(player.name, text)
+        self.terminal.say(
+            label,
+            text,
+            fallback_label=(
+                self._t("系统安全后备", "system safe fallback") if fallback else None
+            ),
+        )
 
     def _winner(self) -> Faction | None:
         """Return the winning faction after applying film third-party priority."""
@@ -1530,9 +1961,12 @@ class Game:
             )
         role_names = localized(ROLE_NAMES, self.config.language)
         reveal = "；".join(
-            f"{player.name}={role_names[player.role]}" for player in self.players
+            f"{self._player_label(player)}={role_names[player.role]}"
+            for player in self.players
         )
-        lover_pair = [player.name for player in self.players if player.lover_id]
+        lover_pair = [
+            self._player_label(player) for player in self.players if player.lover_id
+        ]
         lover_reveal = (
             self._t(
                 f"恋人：{'、'.join(lover_pair)}。",
@@ -1542,10 +1976,16 @@ class Game:
             else ""
         )
         winning_players = self._winning_players(winner)
+        winner_names = set(winning_players)
+        winning_labels = [
+            self._player_label(player)
+            for player in self.players
+            if player.name in winner_names
+        ]
         prize_shares = self._prize_shares(winning_players)
         winners_text = self._t(
-            f"获胜玩家：{'、'.join(winning_players) if winning_players else '无'}。",
-            f"Winning players: {', '.join(winning_players) if winning_players else 'none'}.",
+            f"获胜玩家：{'、'.join(winning_labels) if winning_labels else '无'}。",
+            f"Winning players: {', '.join(winning_labels) if winning_labels else 'none'}.",
         )
         if prize_shares:
             share_percent = f"{prize_shares[0][1] * 100:.2f}".rstrip("0").rstrip(".")
@@ -1578,8 +2018,22 @@ class Game:
             ),
         )
         token_usage = self._llm_token_usage_text()
+        metric_label = self._t("统计", "Metrics")
         if token_usage:
-            self.terminal.progress(token_usage)
+            self.terminal.metric(token_usage, label=metric_label)
+        reliability = self._controller_reliability_text()
+        if reliability:
+            self.terminal.metric(reliability, label=metric_label)
+        for record in self._fallback_records:
+            self.terminal.metric(
+                self._t(
+                    f"后备记录：第 {record.day} 天/{record.phase}，{record.player_name}，"
+                    f"动作 {record.action_kind}，原因 {record.error}",
+                    f"Fallback: day {record.day}/{record.phase}, {record.player_name}, "
+                    f"action {record.action_kind}, reason {record.error}",
+                ),
+                label=metric_label,
+            )
         if self.config.memory_directory:
             self.export_memories(self.config.memory_directory)
         self._clear_checkpoint()
@@ -1590,6 +2044,32 @@ class Game:
             days=self.day,
             survivors=tuple(player.name for player in self._alive()),
             reason=reason,
+            duration_seconds=time.monotonic() - self._started_at,
+            controller_actions=self._controller_metrics.actions,
+            controller_attempts=self._controller_metrics.attempts,
+            controller_failures=self._controller_metrics.failures,
+            controller_retries=self._controller_metrics.retries,
+            controller_fallbacks=self._controller_metrics.fallbacks,
+            seat_labels=tuple(
+                (player.name, self._player_label(player)) for player in self.players
+            ),
+        )
+
+    def _controller_reliability_text(self) -> str:
+        """Summarize LLM reliability without exposing in-game secrets mid-match."""
+        metrics = self._controller_metrics
+        if metrics.actions == 0:
+            return ""
+        clean = metrics.fallbacks == 0
+        return self._t(
+            "LLM 控制器："
+            f"动作 {metrics.actions}，请求尝试 {metrics.attempts}，失败 {metrics.failures}，"
+            f"重试 {metrics.retries}，安全后备 {metrics.fallbacks}。"
+            f"本局{'满足' if clean else '不满足'}完整 LLM 对局标准。",
+            "LLM controllers: "
+            f"{metrics.actions} actions, {metrics.attempts} attempts, {metrics.failures} failures, "
+            f"{metrics.retries} retries, {metrics.fallbacks} safe fallbacks. "
+            f"This match {'meets' if clean else 'does not meet'} the complete-LLM standard.",
         )
 
     def _llm_token_usage_text(self) -> str:
@@ -1655,9 +2135,18 @@ class Game:
             if player.role is Role.WEREWOLF and (player.alive or not alive_only)
         ]
 
-    @staticmethod
-    def _options(players: Iterable[PlayerState]) -> tuple[ActionOption, ...]:
-        return tuple(ActionOption(player.player_id, player.name) for player in players)
+    def _options(self, players: Iterable[PlayerState]) -> tuple[ActionOption, ...]:
+        """Build legal options with stable seat numbers for human and LLM users."""
+        return tuple(
+            ActionOption(player.player_id, self._player_label(player))
+            for player in players
+        )
+
+    def _player_label(self, player: PlayerState) -> str:
+        """Return a localized stable seat label without mutating configured names."""
+        if self.config.language == "en":
+            return f"Seat {player.seat_number} {player.name}"
+        return f"{player.seat_number}号 {player.name}"
 
     def _plurality(self, votes: list[str]) -> str | None:
         if not votes:

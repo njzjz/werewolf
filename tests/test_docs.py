@@ -31,6 +31,7 @@ def test_completed_case_studies_are_public_and_referenced() -> None:
         assert "私密策略" not in transcript
         assert "控制器调用失败" not in transcript
         assert "本地后备" not in transcript
+        assert "系统安全后备" not in transcript
         assert f"examples/case_studies/{filename}" in readme
         if filename.startswith("movie_"):
             assert "[观战" not in transcript
