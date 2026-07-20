@@ -9,6 +9,7 @@ from werewolf.agents import (
     HumanController,
     LLMController,
     OpenAICompatibleClient,
+    SafeFallbackController,
     Terminal,
 )
 from werewolf.config import LLMProviderConfig
@@ -242,6 +243,49 @@ def test_llm_places_append_only_history_before_dynamic_action() -> None:
     assert first[2] != second[2]
 
 
+def test_llm_receives_seat_map_and_public_parity_constraint() -> None:
+    """Structured public mechanics should prevent impossible role-world claims."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+    )
+    controller = LLMController(client)
+    view = PlayerView(
+        player_id="p1",
+        name="玩家0",
+        role=Role.VILLAGER,
+        role_name="平民",
+        role_description="没有夜间技能",
+        faction=Faction.GOOD,
+        lover=None,
+        alive_players=(("p1", "玩家0"), ("p3", "智能体5"), ("p8", "智能体4")),
+        dead_players=(("p2", "智能体3"),),
+        events=(),
+        thoughts=(),
+        skills=(),
+        day=3,
+        phase="discussion",
+        language="zh-CN",
+        seat_number=1,
+        seat_players=(
+            ("p1", 1, "玩家0"),
+            ("p2", 2, "智能体3"),
+            ("p3", 3, "智能体5"),
+            ("p8", 8, "智能体4"),
+        ),
+        mechanical_context="第2天4人存活且游戏继续，因此至多1名存活狼人。",
+    )
+
+    messages = controller._messages(  # noqa: SLF001
+        view,
+        ActionRequest(ActionKind.SPEAK, "请发言"),
+    )
+    current = messages[-1]["content"]
+
+    assert '"seat": 8' in current
+    assert '"alive": false' in current
+    assert "至多1名存活狼人" in current
+
+
 def test_history_trimming_advances_in_cache_friendly_chunks() -> None:
     """Small appends beyond the limit should retain the same trimmed prefix."""
     client = OpenAICompatibleClient(
@@ -291,6 +335,99 @@ def test_human_controller_enables_readline_cursor_bindings(monkeypatch) -> None:
     assert "set editing-mode emacs" in fake.bindings
     assert '"\\e[D": backward-char' in fake.bindings
     assert '"\\e[C": forward-char' in fake.bindings
+
+
+def test_single_human_choice_skips_notes_and_terminal_handoff(monkeypatch) -> None:
+    """One local human should confirm a vote without two unrelated extra prompts."""
+    answers = iter(["/history", "1", ""])
+    prompts: list[str] = []
+
+    def fake_input(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    controller = HumanController(
+        Terminal(clear_screen=True),
+        require_handoff=False,
+        ask_strategy_note=False,
+        confirm_critical_actions=True,
+    )
+    view = PlayerView(
+        player_id="p1",
+        name="一号",
+        role=Role.VILLAGER,
+        role_name="平民",
+        role_description="没有夜间技能",
+        faction=Faction.GOOD,
+        lover=None,
+        alive_players=(("p1", "一号"), ("p2", "二号")),
+        dead_players=(),
+        events=(),
+        thoughts=(),
+        skills=(),
+        day=1,
+        phase="vote",
+        language="zh-CN",
+    )
+
+    response = controller.act(
+        view,
+        ActionRequest(
+            ActionKind.VOTE,
+            "请选择目标",
+            (ActionOption("p2", "2号 二号"),),
+            allow_abstain=True,
+        ),
+    )
+
+    assert response.choice == "p2"
+    assert response.thought == ""
+    assert len(prompts) == 3
+    assert "确认选择" in prompts[2]
+
+
+def test_safe_fallback_abstains_from_optional_irreversible_actions() -> None:
+    """A provider outage must not randomly poison, shoot, or cast a public vote."""
+    view = PlayerView(
+        player_id="p1",
+        name="一号",
+        role=Role.WITCH,
+        role_name="女巫",
+        role_description="有一瓶毒药",
+        faction=Faction.GOOD,
+        lover=None,
+        alive_players=(("p1", "一号"), ("p2", "二号")),
+        dead_players=(),
+        events=(),
+        thoughts=(),
+        skills=(),
+        day=1,
+        phase="night",
+        language="zh-CN",
+    )
+    controller = SafeFallbackController()
+
+    poison = controller.act(
+        view,
+        ActionRequest(
+            ActionKind.WITCH_POISON,
+            "是否用毒",
+            (ActionOption("p2", "2号 二号"),),
+            allow_abstain=True,
+        ),
+    )
+    required = controller.act(
+        view,
+        ActionRequest(
+            ActionKind.SEER_INSPECT,
+            "必须查验",
+            (ActionOption("p2", "2号 二号"),),
+        ),
+    )
+
+    assert poison.choice is None
+    assert required.choice == "p2"
 
 
 def test_responses_sse_stream_is_assembled_without_exposing_partial_json() -> None:

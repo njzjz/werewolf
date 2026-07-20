@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -35,15 +36,27 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="结束后不导出个人记忆",
     )
-    play_parser.add_argument(
+    progress_mode = play_parser.add_mutually_exclusive_group()
+    progress_mode.add_argument(
         "--spectator",
         action="store_true",
         help="实时显示不泄密的 LLM 行动与推理进度",
     )
-    play_parser.add_argument(
+    progress_mode.add_argument(
+        "--no-spectator",
+        action="store_true",
+        help="关闭 LLM 行动与推理进度显示",
+    )
+    controller_mode = play_parser.add_mutually_exclusive_group()
+    controller_mode.add_argument(
         "--strict-controllers",
         action="store_true",
         help="控制器失败或非法选择时终止，不使用本地机器人后备",
+    )
+    controller_mode.add_argument(
+        "--allow-fallback",
+        action="store_true",
+        help="控制器重试耗尽后使用有明确标识的确定性安全后备",
     )
     play_parser.add_argument(
         "--transcript",
@@ -62,6 +75,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume",
         help="从指定私密恢复点继续游戏",
     )
+    play_parser.add_argument(
+        "--strategy-notes",
+        action="store_true",
+        help="每次真人行动后询问可选的私密策略笔记",
+    )
+    play_parser.add_argument(
+        "--no-confirm",
+        action="store_true",
+        help="真人关键选择不再二次确认",
+    )
+    play_parser.add_argument(
+        "--json-result",
+        action="store_true",
+        help="在本地化结算后额外输出一行机器可读 JSON",
+    )
+    play_parser.add_argument(
+        "--sequential-votes",
+        action="store_true",
+        help="禁用互不可见的 LLM 公开投票并发请求",
+    )
 
     demo_parser = subparsers.add_parser("demo", help="运行无需 API 的本地机器人演示")
     demo_parser.add_argument("--players", type=int, choices=range(6, 17))
@@ -79,6 +112,7 @@ def main(argv: list[str] | None = None) -> None:
     """Execute a CLI subcommand and provide concise terminal errors."""
     args = build_parser().parse_args(argv)
     resume_checkpoint: str | None = None
+    active_checkpoint: str | None = None
     try:
         if args.command == "init":
             path = write_example_config(args.path, force=args.force)
@@ -97,31 +131,83 @@ def main(argv: list[str] | None = None) -> None:
                 config = replace(config, memory_directory=None)
             if args.spectator:
                 config = replace(config, spectator_progress=True)
+            if args.no_spectator:
+                config = replace(config, spectator_progress=False)
             if args.strict_controllers:
                 config = replace(config, strict_controllers=True)
+            if args.allow_fallback:
+                config = replace(config, strict_controllers=False)
             if args.transcript:
                 config = replace(config, public_transcript_path=args.transcript)
             if args.controller_retries is not None:
                 config = replace(config, controller_retries=args.controller_retries)
             if args.checkpoint:
                 config = replace(config, checkpoint_path=args.checkpoint)
+            if args.strategy_notes:
+                config = replace(config, human_strategy_notes=True)
+            if args.no_confirm:
+                config = replace(config, confirm_critical_actions=False)
+            if args.sequential_votes:
+                config = replace(config, parallel_llm_votes=False)
             resume_checkpoint = args.resume
+            active_checkpoint = resume_checkpoint or config.checkpoint_path
         result = Game(config, resume_checkpoint=resume_checkpoint).run()
         winner = result.winner.value if result.winner else "draw"
-        print(
-            f"\n游戏结束：winner={winner}, winners={list(result.winning_players)}, "
-            f"prize_shares={dict(result.prize_shares)}, days={result.days}, "
-            f"survivors={list(result.survivors)}",
-        )
+        duration = f"{result.duration_seconds:.1f}"
+        seat_labels = dict(result.seat_labels)
+        survivor_labels = [seat_labels.get(name, name) for name in result.survivors]
+        if config.language == "en":
+            print(
+                f"\nMatch complete: {result.days} days, {duration}s; "
+                f"survivors: {', '.join(survivor_labels) or 'none'}; "
+                f"safe fallbacks: {result.controller_fallbacks}.",
+            )
+        else:
+            print(
+                f"\n本局完成：共 {result.days} 天，用时 {duration} 秒；"
+                f"存活：{'、'.join(survivor_labels) or '无'}；"
+                f"系统安全后备：{result.controller_fallbacks} 次。",
+            )
+        if args.command == "play" and args.json_result:
+            print(
+                json.dumps(
+                    {
+                        "winner": winner,
+                        "winning_players": list(result.winning_players),
+                        "prize_shares": dict(result.prize_shares),
+                        "days": result.days,
+                        "survivors": list(result.survivors),
+                        "reason": result.reason,
+                        "duration_seconds": result.duration_seconds,
+                        "controller_actions": result.controller_actions,
+                        "controller_attempts": result.controller_attempts,
+                        "controller_failures": result.controller_failures,
+                        "controller_retries": result.controller_retries,
+                        "controller_fallbacks": result.controller_fallbacks,
+                        "seat_labels": seat_labels,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
     except KeyboardInterrupt:
         print("\n游戏已中止。", file=sys.stderr)
         raise SystemExit(130) from None
+    except RuntimeError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        if active_checkpoint and Path(active_checkpoint).exists():
+            print(
+                f"恢复点已保留，可运行：werewolf play --config {args.config} "
+                f"--resume {active_checkpoint}",
+                file=sys.stderr,
+            )
+        raise SystemExit(2) from exc
     except (
         FileNotFoundError,
         FileExistsError,
         KeyError,
+        TypeError,
         ValueError,
-        RuntimeError,
     ) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         raise SystemExit(2) from exc

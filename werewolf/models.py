@@ -185,6 +185,7 @@ class PlayerState:
     role: Role
     controller: object
     skills: tuple[Skill, ...]
+    seat_number: int = 0
     memory: PlayerMemory = field(default_factory=PlayerMemory)
     alive: bool = True
     lover_id: str | None = None
@@ -209,6 +210,9 @@ class PlayerView:
     day: int
     phase: str
     language: str
+    seat_number: int = 0
+    seat_players: tuple[tuple[str, int, str], ...] = ()
+    mechanical_context: str = ""
 
 
 class ActionKind(str, Enum):
@@ -248,9 +252,18 @@ class ActionRequest:
 
 @dataclass(frozen=True)
 class AgentResponse:
-    """Controller output. ``thought`` and ``note`` are always private."""
+    """Controller output plus judge-owned delivery metadata.
+
+    ``thought`` and ``note`` are always private. Controllers normally leave the
+    fallback fields at their defaults; the judge sets them only when a failed
+    controller action has been replaced by an explicitly configured safe
+    fallback.
+    """
 
     choice: str | None = None
     text: str = ""
     thought: str = ""
     note: str = ""
+    used_fallback: bool = False
+    fallback_error: str = ""
+    attempts: int = 1

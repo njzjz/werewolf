@@ -29,7 +29,8 @@ werewolf play --config werewolf.json
 - 真人与 LLM 混坐；每个 LLM 可配置独立 API、模型、persona 和行为技能。
 - 每名玩家拥有独立的可见历史、私密心路历程和身份技能，不共享完整上下文。
 - 公开、单人私密、狼人频道、恋人频道在进入控制器前完成权限裁剪。
-- 支持 SSE 流式接收、严格纯 LLM 模式、逐调用恢复点、公开观战日志和 Prompt Caching 优化。
+- 支持 SSE 流式接收、严格纯 LLM 模式、逐调用恢复点、公开观战日志、并行秘密投票和 Prompt Caching 优化。
+- 真人界面使用稳定座位号、紧凑存活状态和公开胜负约束；单真人不会重复要求交接终端。
 - 默认中文法官与中文 LLM，保留 `zh-CN`/`en` 语言切换设计。
 - 运行时零第三方依赖，API 客户端使用 Python 标准库。
 
@@ -62,12 +63,12 @@ werewolf play --config werewolf.json
   "use_json_mode": false,
   "stream": true,
   "timeout": 300,
-  "max_tokens": 500,
+  "max_tokens": 2000,
   "prompt_cache": false
 }
 ```
 
-推荐通过 `api_key_env` 注入密钥。兼容服务支持 SSE 时开启 `stream`；正式纯 LLM 对局同时开启 `strict_controllers`、重试、公开日志和私密恢复点：
+推荐通过 `api_key_env` 注入密钥。`werewolf init` 生成的配置已经默认开启安全进度、严格控制器、两次重试、公开日志和私密恢复点：
 
 ```bash
 werewolf play --config movie.json --spectator --strict-controllers \
@@ -86,6 +87,8 @@ werewolf play --config movie.json \
 ```
 
 每次控制器成功返回后都会写入动作日志。恢复时只重新请求第一个未完成动作，已完成的公开发言、投票和私密响应由恢复日志重放。
+
+如果只是休闲体验并希望在 provider 长时间不可用时继续游戏，可以显式使用 `--allow-fallback`。安全后备会公开标识降级，投票、女巫用药和猎人开枪默认弃权；必须执行的私密能力采用第一个合法选项，不再随机改变关键局势。终局会汇总失败、重试和后备次数，并说明本局是否满足完整 LLM 对局标准。
 
 Provider 字段、Prompt Caching、真人终端、观战、恢复点和记忆导出见 [配置与运行](docs/configuration.md)。
 

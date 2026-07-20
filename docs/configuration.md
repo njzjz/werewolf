@@ -17,6 +17,9 @@
   "controller_retries": 2,
   "public_transcript_path": "game_runs/public.log",
   "checkpoint_path": "game_runs/private.checkpoint.json",
+  "human_strategy_notes": false,
+  "confirm_critical_actions": true,
+  "parallel_llm_votes": true,
   "providers": {
     "default": {
       "base_url": "https://api.openai.com/v1",
@@ -27,7 +30,7 @@
       "use_json_mode": false,
       "stream": true,
       "timeout": 300,
-      "max_tokens": 500,
+      "max_tokens": 2000,
       "prompt_cache": false
     }
   },
@@ -60,14 +63,17 @@
 | `context_char_limit` | 单个玩家可见历史进入 LLM 提示词的字符上限 |
 | `memory_directory` | 终局后导出每名玩家的独立记忆；设为 `null` 可关闭 |
 | `spectator_progress` | 显示不泄密的行动进度和单行推理耗时 |
-| `strict_controllers` | LLM 失败时直接终止，不回退到本地 bot |
+| `strict_controllers` | LLM 重试耗尽后终止并保留恢复点；新配置默认开启 |
 | `controller_retries` | 严格终止前，对同一个 LLM 动作的重试次数 |
 | `public_transcript_path` | 实时写入可公开分享的 UTF-8 观战日志 |
 | `checkpoint_path` | 保存含私密状态和响应日志的恢复点 |
+| `human_strategy_notes` | 每次真人行动后是否询问可选的私密策略笔记；默认关闭 |
+| `confirm_critical_actions` | 投票、用药、开枪、查验等真人选择是否二次确认 |
+| `parallel_llm_votes` | 并行请求互不可见的 LLM 公开投票；按座位顺序写入恢复日志 |
 
 ## 玩家控制器
 
-- `human`：从当前终端读取发言、选择和私密策略笔记。
+- `human`：从当前终端读取发言和选择；策略笔记可通过配置或 `--strategy-notes` 开启。
 - `llm`：调用指定 provider；每次只发送该玩家已经获权的个人视图。
 - `bot`：不访问网络的简单本地机器人，用于演示和测试，不代表 LLM 水平。
 
@@ -114,7 +120,7 @@ Responses provider 可选：
 
 开启后，客户端把每名玩家稳定的私密系统前缀散列成不含明文身份信息的独立 `prompt_cache_key`。`prompt_cache_retention` 可选 `in-memory` 或 `24h`，实际支持范围由模型和兼容服务决定。
 
-部分代理会拒绝这些新字段，因此默认关闭。即使 `prompt_cache` 为 `false`，上游若支持自动前缀缓存，稳定前缀设计仍然有效。游戏结束时，如果 provider 返回 `usage`，终端会汇总输入、缓存命中和输出 token；恢复后的统计只覆盖当前进程。
+部分代理会拒绝这些新字段，因此默认关闭。即使 `prompt_cache` 为 `false`，上游若支持自动前缀缓存，稳定前缀设计仍然有效。游戏结束时，如果 provider 返回 `usage`，终端会汇总输入、缓存命中和输出 token；token 统计只覆盖当前进程，游戏时长和控制器可靠性统计会随恢复点延续。
 
 参考：[OpenAI Prompt Caching](https://developers.openai.com/api/docs/guides/prompt-caching)。
 
@@ -144,11 +150,31 @@ werewolf play --config movie.json \
 
 每次控制器成功返回后都会写入动作日志。恢复时程序回到安全阶段边界，重放已经完成的响应，只重新请求第一个未完成动作，避免重复投票或重复使用技能。
 
+严格模式中，私密夜间动作失败时终端错误不会显示玩家姓名或具体身份能力，避免恢复后污染信息边界。CLI 会保留恢复点并直接打印可复制的 `--resume` 命令。
+
+启动时还会检查常见实时体验风险：关闭进度、未配置恢复点、允许后备、`xhigh` 推理或超过 5000 token 的单动作输出预算都会在身份分配前给出公开提示。
+
+### 显式安全后备
+
+`--allow-fallback` 或 `strict_controllers: false` 适合不要求完整 LLM 可信度的休闲对局。它与旧式随机本地机器人后备不同：
+
+- 公开发言、遗言和票型会标记“系统安全后备”；
+- 投票、女巫用药、猎人开枪等可放弃动作默认弃权；
+- 查验、守护、丘比特连人等必须选择的能力使用第一个合法座位；
+- 私密后备在过程中只显示不泄密的技术提示，终局再披露玩家、动作和错误；
+- 终局统计会明确说明本局不满足完整 LLM 对局标准。
+
 公开日志只包含法官公告、公开发言、公开投票、合法遗言和安全进度。恢复点包含身份、恋人关系、私密记忆、心路历程和响应记录，权限设为 `0600`，不能公开分享。
 
 ## 真人终端
 
-多名真人共用终端时应保持 `clear_screen: true`，并避免查看终端回滚缓冲。正式线下局更适合每名真人使用独立进程或设备。
+多名真人共用终端时应保持 `clear_screen: true`，并避免查看终端回滚缓冲。正式线下局更适合每名真人使用独立进程或设备。只有一名真人时，程序不再在每次行动后要求“交接终端”；多真人时仍保留清屏和交接流程。
+
+真人私密回合会显示稳定座位号、当前存活/死亡名单、最近关键事件，以及最近一次已完成胜负检查产生的公开狼人数量上限。相同的座位图和机械约束也会进入 LLM 当前请求，减少与即时胜负条件冲突的身份叙事。
+
+精简面板不会删除任何授权信息；在发言或选择提示中输入 `/history` 可以随时按昼夜分组查看完整个人可见历史，然后继续当前动作。
+
+关键选择默认需要回车确认；可用 `--no-confirm` 关闭。机器调用方可以使用 `--json-result` 在本地化结算后追加一行结构化结果。
 
 Unix/Linux/macOS 会自动启用 `readline`/`libedit`，支持中文按字符退格和左右移动光标；缺少 readline 时回退到 Python 基础输入行为。
 

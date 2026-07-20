@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +17,7 @@ from werewolf.config import (
     PlayerConfig,
     RuleConfig,
     demo_config,
+    example_config,
     load_config,
 )
 from werewolf.engine import DeathCause, Game, role_deck
@@ -106,6 +108,18 @@ class FlakyController:
         return AgentResponse(text="重试成功", thought="保留私密判断")
 
 
+class BarrierVoteController:
+    """Require two vote calls to overlap, proving the engine uses concurrency."""
+
+    def __init__(self, barrier: threading.Barrier) -> None:
+        self.barrier = barrier
+
+    def act(self, _view, request):
+        """Wait for the peer vote before choosing the first legal target."""
+        self.barrier.wait()
+        return AgentResponse(choice=request.options[0].value)
+
+
 @pytest.mark.parametrize(
     ("count", "wolves", "hunters"),
     [(6, 2, 0), (8, 2, 1), (9, 3, 1), (12, 4, 1), (16, 5, 1)],
@@ -151,6 +165,8 @@ def fixed_role_config(
         seed=1,
         clear_screen=False,
         memory_directory=None,
+        spectator_progress=False,
+        controller_retries=0,
         rules=RuleConfig(max_days=5, randomize_seating=False),
         role_preset=role_preset,
     )
@@ -311,7 +327,7 @@ def test_spectator_progress_streams_without_revealing_private_actor() -> None:
         ActionRequest(ActionKind.TEAM_CHAT, "狼聊"),
     )
 
-    assert terminal.progress_events[0] == "玩家1 正在组织公开发言……"
+    assert terminal.progress_events[0] == "1号 玩家1 正在组织公开发言……"
     assert terminal.progress_events[1] == "一项夜间私密行动正在处理中……"
     assert "玩家1" not in terminal.progress_events[1]
     assert "狼人" not in terminal.progress_events[1]
@@ -372,6 +388,30 @@ def test_strict_controllers_never_fall_back_to_local_bot() -> None:
         )
 
 
+def test_strict_private_failure_does_not_reveal_actor_or_ability() -> None:
+    """A resumable night failure must not contaminate the shared terminal."""
+    game = Game(
+        replace(fixed_config(), strict_controllers=True),
+        controllers={"p1": FailingController()},
+        terminal=SilentTerminal(),
+    )
+
+    with pytest.raises(RuntimeError) as captured:
+        game._act(  # noqa: SLF001
+            game._by_id["p1"],  # noqa: SLF001
+            ActionRequest(
+                ActionKind.WOLF_KILL,
+                "选择刀口",
+                (ActionOption("p3", "3号 玩家3"),),
+            ),
+        )
+
+    error = str(captured.value)
+    assert "玩家1" not in error
+    assert "wolf_kill" not in error
+    assert "private action" in error
+
+
 def test_controller_retries_stay_llm_only() -> None:
     """Transient failures should retry the same controller without bot fallback."""
     controller = FlakyController()
@@ -394,6 +434,126 @@ def test_controller_retries_stay_llm_only() -> None:
     assert controller.calls == 2
     assert response.text == "重试成功"
     assert game._by_id["p1"].memory.thoughts[-1].text == "保留私密判断"  # noqa: SLF001
+
+
+def test_non_strict_failure_uses_visible_safe_fallback_and_metrics() -> None:
+    """Casual fallback should abstain, report degradation, and remain auditable."""
+    provider = LLMProviderConfig(base_url="https://example.invalid/v1", model="test")
+    config = fixed_config()
+    config = replace(
+        config,
+        players=tuple(
+            replace(player, controller="llm", provider="test")
+            for player in config.players
+        ),
+        providers={"test": provider},
+        strict_controllers=False,
+        spectator_progress=True,
+    )
+    terminal = CapturingTerminal()
+    game = Game(
+        config,
+        controllers={"p1": FailingController()},
+        terminal=terminal,
+    )
+
+    response = game._act(  # noqa: SLF001
+        game._by_id["p1"],  # noqa: SLF001
+        ActionRequest(
+            ActionKind.VOTE,
+            "投票",
+            (ActionOption("p2", "2号 玩家2"),),
+            allow_abstain=True,
+        ),
+    )
+
+    assert response.choice is None
+    assert response.used_fallback is True
+    assert game._controller_metrics.fallbacks == 1  # noqa: SLF001
+    assert any(
+        "公开动作已使用系统安全后备" in item for item in terminal.progress_events
+    )
+
+
+def test_llm_public_votes_are_collected_in_parallel() -> None:
+    """Mutually invisible LLM votes should overlap while preserving seat-order output."""
+    provider = LLMProviderConfig(base_url="https://example.invalid/v1", model="test")
+    config = fixed_config()
+    config = replace(
+        config,
+        players=tuple(
+            replace(player, controller="llm", provider="test")
+            for player in config.players
+        ),
+        providers={"test": provider},
+        parallel_llm_votes=True,
+    )
+    barrier = threading.Barrier(2, timeout=2)
+    controllers = {
+        "p1": BarrierVoteController(barrier),
+        "p2": BarrierVoteController(barrier),
+        **{f"p{index}": ScriptedController() for index in range(3, 7)},
+    }
+    game = Game(config, controllers=controllers, terminal=SilentTerminal())
+    game.phase = "vote"
+
+    votes = game._collect_votes(None)  # noqa: SLF001
+
+    assert list(votes) == [f"p{index}" for index in range(1, 7)]
+    assert all(target is not None for target in votes.values())
+
+
+def test_parallel_votes_remain_replayable_from_checkpoint(tmp_path) -> None:
+    """Concurrent requests must still journal responses in deterministic seat order."""
+    provider = LLMProviderConfig(base_url="https://example.invalid/v1", model="test")
+    checkpoint = tmp_path / "private.checkpoint.json"
+    transcript = tmp_path / "public.log"
+    base = fixed_config()
+    config = replace(
+        base,
+        players=tuple(
+            replace(player, controller="llm", provider="test")
+            for player in base.players
+        ),
+        providers={"test": provider},
+        checkpoint_path=str(checkpoint),
+        public_transcript_path=str(transcript),
+        parallel_llm_votes=True,
+    )
+    controllers = {f"p{index}": ScriptedController() for index in range(1, 7)}
+    game = Game(config, controllers=controllers)
+    game.day = 1
+    game.phase = "vote"
+    game._save_checkpoint(next_day=1, next_step="daytime")  # noqa: SLF001
+
+    original_votes = game._collect_votes(None)  # noqa: SLF001
+    failing = {f"p{index}": FailingController() for index in range(1, 7)}
+    resumed = Game(
+        config,
+        controllers=failing,
+        resume_checkpoint=checkpoint,
+    )
+    resumed.day = 1
+    resumed.phase = "vote"
+
+    replayed_votes = resumed._collect_votes(None)  # noqa: SLF001
+
+    assert replayed_votes == original_votes
+    assert all(len(controller.requests) == 1 for controller in controllers.values())
+
+
+def test_generated_config_defaults_to_recoverable_strict_play() -> None:
+    """New users should receive safe live-game defaults without extra CLI flags."""
+    config = example_config()
+
+    assert config["spectator_progress"] is True
+    assert config["strict_controllers"] is True
+    assert config["controller_retries"] == 2
+    assert config["checkpoint_path"] == "game_runs/private.checkpoint.json"
+    assert config["public_transcript_path"] == "game_runs/public.log"
+    assert config["parallel_llm_votes"] is True
+    assert config["human_strategy_notes"] is False
+    assert config["providers"]["default"]["max_tokens"] == 2000
 
 
 def test_checkpoint_replays_each_completed_controller_call(tmp_path) -> None:
@@ -756,7 +916,7 @@ def test_lover_dies_of_heartbreak_and_lovers_can_steal_the_endgame() -> None:
     assert not death_game._by_id["p1"].alive  # noqa: SLF001
     assert not death_game._by_id["p3"].alive  # noqa: SLF001
     assert any(
-        "恋人 玩家3 随之殉情" in event.text
+        "恋人 3号 玩家3 随之殉情" in event.text
         for event in death_game._by_id["p4"].memory.events  # noqa: SLF001
     )
     assert all(

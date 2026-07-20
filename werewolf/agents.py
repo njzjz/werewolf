@@ -21,6 +21,7 @@ from .models import (
     ActionKind,
     ActionRequest,
     AgentResponse,
+    MemoryEvent,
     PlayerView,
     Visibility,
 )
@@ -145,6 +146,14 @@ class Terminal:
         """Print a persistent spectator event without game secrets."""
         self._emit(f"[观战] {text}")
 
+    def metric(self, text: str, *, label: str = "统计") -> None:
+        """Print an end-of-game technical summary distinct from live progress."""
+        self._emit(f"[{label}] {text}")
+
+    def notice(self, text: str, *, label: str = "提示") -> None:
+        """Print a persistent preflight warning before private roles are assigned."""
+        self._emit(f"[{label}] {text}")
+
     def transient_progress(self, text: str) -> None:
         """Update one in-place TTY status without appending it to public logs."""
         if not sys.stdout.isatty():
@@ -160,9 +169,16 @@ class Terminal:
         with self._output_lock:
             self._clear_transient_progress_locked()
 
-    def say(self, player_name: str, text: str) -> None:
+    def say(
+        self,
+        player_name: str,
+        text: str,
+        *,
+        fallback_label: str | None = None,
+    ) -> None:
         """Print and persist one completed public player statement."""
-        self._emit(f"[{player_name}] {text}")
+        marker = f" · {fallback_label}" if fallback_label else ""
+        self._emit(f"[{player_name}{marker}] {text}")
 
     def _emit(self, rendered: str) -> None:
         """Write a public line to stdout and the optional spectator transcript."""
@@ -202,16 +218,19 @@ class Terminal:
     def private_turn(self, view: PlayerView) -> None:
         """Render only the active human's already-authorized memory."""
         self.clear()
+        seat = f"{view.seat_number}号 " if view.seat_number else ""
         if view.language == "en":
-            print(f"=== Private turn: {view.name} | Role: {view.role_name} ===")
+            seat = f"Seat {view.seat_number} " if view.seat_number else ""
+            print(f"=== Private turn: {seat}{view.name} | Role: {view.role_name} ===")
             print(view.role_description)
         else:
-            print(f"=== {view.name} 的私密回合 | 身份：{view.role_name} ===")
+            print(f"=== {seat}{view.name} 的私密回合 | 身份：{view.role_name} ===")
             print(view.role_description)
         if view.lover:
             lover_label = "Lover" if view.language == "en" else "恋人"
             print(f"{lover_label}: {view.lover[1]}")
-        recent = view.events[-18:]
+        self._render_state(view)
+        recent = self._recent_events(view)
         if recent:
             title = (
                 "Recent authorized information"
@@ -237,12 +256,99 @@ class Terminal:
             )
             print(f"\n--- {title} ---\n{view.thoughts[-1].text}")
 
+    @staticmethod
+    def full_history(view: PlayerView) -> None:
+        """Render the complete authorized timeline on explicit human request."""
+        title = (
+            "Complete authorized history" if view.language == "en" else "完整可见历史"
+        )
+        print(f"\n=== {title} ===")
+        last_group: tuple[int, str] | None = None
+        for event in view.events:
+            group = (event.day, event.phase)
+            if group != last_group:
+                print(f"\n--- D{event.day} / {event.phase} ---")
+                last_group = group
+            marker = (
+                event.visibility.value
+                if view.language == "en"
+                else {
+                    Visibility.PUBLIC: "公开",
+                    Visibility.PRIVATE: "私密",
+                    Visibility.WEREWOLF: "狼队",
+                    Visibility.LOVERS: "恋人",
+                }[event.visibility]
+            )
+            print(f"[{marker}] {event.text}")
+
+    @staticmethod
+    def _recent_events(view: PlayerView) -> tuple[MemoryEvent, ...]:
+        """Keep the active day readable while retaining key older milestones."""
+        current = [event for event in view.events if event.day == view.day]
+        important_words = (
+            "游戏开始",
+            "Game begins",
+            "公开投票结果",
+            "Public votes",
+            "被放逐",
+            "eliminated",
+            "昨夜死亡",
+            "night's deaths",
+            "平安夜",
+            "Nobody died",
+        )
+        older_important = [
+            event
+            for event in view.events
+            if event.day < view.day
+            and any(word in event.text for word in important_words)
+        ]
+        selected = [*older_important[-5:], *current]
+        return tuple(selected[-16:])
+
+    @staticmethod
+    def _render_state(view: PlayerView) -> None:
+        """Show a compact public-state panel before the authorized timeline."""
+        if not view.seat_players:
+            return
+        alive_ids = {player_id for player_id, _ in view.alive_players}
+        alive = [
+            (f"Seat {seat} {name}" if view.language == "en" else f"{seat}号 {name}")
+            for player_id, seat, name in view.seat_players
+            if player_id in alive_ids
+        ]
+        dead = [
+            (f"Seat {seat} {name}" if view.language == "en" else f"{seat}号 {name}")
+            for player_id, seat, name in view.seat_players
+            if player_id not in alive_ids
+        ]
+        if view.language == "en":
+            print(f"\n--- Public state | Day {view.day} · {view.phase} ---")
+            print(f"Alive ({len(alive)}): {', '.join(alive)}")
+            print(f"Dead ({len(dead)}): {', '.join(dead) if dead else 'none'}")
+        else:
+            print(f"\n--- 公共状态 | 第 {view.day} 天 · {view.phase} ---")
+            print(f"存活（{len(alive)}）：{'、'.join(alive)}")
+            print(f"死亡（{len(dead)}）：{'、'.join(dead) if dead else '无'}")
+        if view.mechanical_context:
+            print(view.mechanical_context)
+
 
 class HumanController:
     """Read decisions from the person currently using the terminal."""
 
-    def __init__(self, terminal: Terminal) -> None:
+    def __init__(
+        self,
+        terminal: Terminal,
+        *,
+        require_handoff: bool = True,
+        ask_strategy_note: bool = True,
+        confirm_critical_actions: bool = True,
+    ) -> None:
         self.terminal = terminal
+        self.require_handoff = require_handoff
+        self.ask_strategy_note = ask_strategy_note
+        self.confirm_critical_actions = confirm_critical_actions
         self._enable_line_editing()
 
     @staticmethod
@@ -261,20 +367,34 @@ class HumanController:
         """Collect a validated choice and an optional private strategy note."""
         self.terminal.private_turn(view)
         print(f"\n{request.prompt}")
+        print(
+            "Type /history to view the complete authorized timeline."
+            if view.language == "en"
+            else "输入 /history 可查看完整可见历史。",
+        )
         if request.kind in {
             ActionKind.SPEAK,
             ActionKind.LAST_WORDS,
             ActionKind.TEAM_CHAT,
             ActionKind.LOVER_CHAT,
         }:
-            text = input("> ").strip()
-            thought = self._thought(view)
+            text = self._read_text(view)
+            thought = self._thought(view) if self.ask_strategy_note else ""
             self._handoff(view)
             return AgentResponse(text=text, thought=thought)
         choice = self._choose(view, request)
-        thought = self._thought(view)
+        thought = self._thought(view) if self.ask_strategy_note else ""
         self._handoff(view)
         return AgentResponse(choice=choice, thought=thought)
+
+    def _read_text(self, view: PlayerView) -> str:
+        """Read speech while reserving an explicit full-history command."""
+        while True:
+            text = input("> ").strip()
+            if text == "/history":
+                self.terminal.full_history(view)
+                continue
+            return text
 
     @staticmethod
     def _thought(view: PlayerView) -> str:
@@ -285,23 +405,28 @@ class HumanController:
         )
         return input(prompt).strip()
 
-    @staticmethod
-    def _choose(view: PlayerView, request: ActionRequest) -> str | None:
-        for index, option in enumerate(request.options, start=1):
-            print(f"  {index}. {option.label}")
-        abstain_label = "Abstain" if view.language == "en" else "弃权/不使用"
-        if request.allow_abstain:
-            print(f"  0. {abstain_label}")
+    def _choose(self, view: PlayerView, request: ActionRequest) -> str | None:
+        self._print_options(view, request)
         legal = {
             str(index): option.value
             for index, option in enumerate(request.options, start=1)
         }
+        abstain_label = self._abstain_label(view, request.kind)
         while True:
             raw = input("> ").strip()
+            if raw == "/history":
+                self.terminal.full_history(view)
+                self._print_options(view, request)
+                continue
             if request.allow_abstain and raw in {"", "0"}:
-                return None
+                if self._confirm_choice(view, request, abstain_label):
+                    return None
+                continue
             if raw in legal:
-                return legal[raw]
+                option = request.options[int(raw) - 1]
+                if self._confirm_choice(view, request, option.label):
+                    return option.value
+                continue
             retry = (
                 "Please enter a listed number."
                 if view.language == "en"
@@ -309,8 +434,61 @@ class HumanController:
             )
             print(retry)
 
+    def _print_options(self, view: PlayerView, request: ActionRequest) -> None:
+        """Render choices again after a history lookup or rejected confirmation."""
+        for index, option in enumerate(request.options, start=1):
+            print(f"  {index}. {option.label}")
+        abstain_label = self._abstain_label(view, request.kind)
+        if request.allow_abstain:
+            print(f"  0. {abstain_label}")
+
+    def _confirm_choice(
+        self,
+        view: PlayerView,
+        request: ActionRequest,
+        label: str,
+    ) -> bool:
+        """Confirm irreversible or publicly consequential human choices."""
+        critical = {
+            ActionKind.VOTE,
+            ActionKind.WOLF_KILL,
+            ActionKind.SEER_INSPECT,
+            ActionKind.WITCH_SAVE,
+            ActionKind.WITCH_POISON,
+            ActionKind.HUNTER_SHOOT,
+            ActionKind.BODYGUARD_PROTECT,
+            ActionKind.CUPID_LINK,
+        }
+        if not self.confirm_critical_actions or request.kind not in critical:
+            return True
+        prompt = (
+            f"Confirm [{label}]? Press Enter to confirm, or r to choose again: "
+            if view.language == "en"
+            else f"确认选择【{label}】？回车确认，输入 r 重选："
+        )
+        return input(prompt).strip().lower() != "r"
+
+    @staticmethod
+    def _abstain_label(view: PlayerView, kind: ActionKind) -> str:
+        """Use action-specific wording instead of conflating votes and skills."""
+        if view.language == "en":
+            return {
+                ActionKind.VOTE: "Abstain",
+                ActionKind.WOLF_KILL: "No attack",
+                ActionKind.WITCH_SAVE: "Do not use antidote",
+                ActionKind.WITCH_POISON: "Do not use poison",
+                ActionKind.HUNTER_SHOOT: "Do not shoot",
+            }.get(kind, "Do not use")
+        return {
+            ActionKind.VOTE: "弃权",
+            ActionKind.WOLF_KILL: "不袭击",
+            ActionKind.WITCH_SAVE: "不使用解药",
+            ActionKind.WITCH_POISON: "不使用毒药",
+            ActionKind.HUNTER_SHOOT: "不开枪",
+        }.get(kind, "不使用")
+
     def _handoff(self, view: PlayerView) -> None:
-        if self.terminal.clear_screen and sys.stdout.isatty():
+        if self.require_handoff and self.terminal.clear_screen and sys.stdout.isatty():
             prompt = (
                 "Press Enter and pass the terminal..."
                 if view.language == "en"
@@ -632,8 +810,10 @@ class LLMController:
         )
         system = (
             "你正在参加一局狼人杀。你只能依据下面提供的个人视图行动；未出现的信息对你不可见，"
-            "不得假设或索取其他玩家的私密上下文。法官是确定性程序，必须服从合法选项。\n"
-            f"{language_rule}\n你的名字：{view.name}\n你的身份：{view.role_name}\n"
+            "不得假设或索取其他玩家的私密上下文。法官是确定性程序，必须服从合法选项；"
+            "身份推演必须满足当前请求中的公开机械约束，尤其不能构造本应已经触发终局的存活狼坑。\n"
+            f"{language_rule}\n你的名字：{view.name}\n你的座位号：{view.seat_number or '未提供'}\n"
+            f"你的身份：{view.role_name}\n"
             f"身份说明：{view.role_description}\n人物设定：{self.persona or '自然参与游戏'}\n"
             f"恋人信息：{view.lover[1] if view.lover else '无'}\n"
             f"个人技能：\n{skills}\n"
@@ -652,11 +832,22 @@ class LLMController:
         options = [
             {"value": item.value, "label": item.label} for item in request.options
         ]
+        seat_map = [
+            {
+                "id": player_id,
+                "seat": seat,
+                "name": name,
+                "alive": any(
+                    alive_id == player_id for alive_id, _ in view.alive_players
+                ),
+            }
+            for player_id, seat, name in view.seat_players
+        ]
         history_message = f"你的可见历史：\n{history or '（暂无）'}"
         current_request = (
             f"当前：第 {view.day} 天，阶段 {view.phase}\n"
-            f"存活玩家：{[name for _, name in view.alive_players]}\n"
-            f"死亡玩家：{[name for _, name in view.dead_players]}\n"
+            f"座位与存活状态：{json.dumps(seat_map, ensure_ascii=False)}\n"
+            f"公开机械约束：{view.mechanical_context or '暂无额外约束'}\n"
             f"法官请求：{request.prompt}\n动作类型：{request.kind.value}\n"
             f"合法选项：{json.dumps(options, ensure_ascii=False)}\n"
             f"允许弃权：{request.allow_abstain}\n"
@@ -720,7 +911,7 @@ class LLMController:
 
 
 class BotController:
-    """Offline baseline controller used for demos, tests, and API fallbacks."""
+    """Offline baseline controller used for demos and deterministic tests."""
 
     def __init__(self, rng: random.Random | None = None) -> None:
         self.rng = rng or random.Random()  # noqa: S311 - game simulation, not security.
@@ -750,7 +941,7 @@ class BotController:
 
     def _speech(self, view: PlayerView, request: ActionRequest) -> str:
         alive = [
-            name
+            self._visible_label(view, player_id, name)
             for player_id, name in view.alive_players
             if player_id != view.player_id
         ]
@@ -767,7 +958,7 @@ class BotController:
 
     def _team_message(self, view: PlayerView) -> str:
         targets = [
-            name
+            self._visible_label(view, player_id, name)
             for player_id, name in view.alive_players
             if player_id != view.player_id
         ]
@@ -778,7 +969,11 @@ class BotController:
 
     @staticmethod
     def _lover_message(view: PlayerView) -> str:
-        partner = view.lover[1] if view.lover else "partner"
+        partner = (
+            BotController._visible_label(view, view.lover[0], view.lover[1])
+            if view.lover
+            else "partner"
+        )
         if view.language == "en":
             return (
                 f"{partner}, we should keep both of us alive without exposing our link."
@@ -786,7 +981,48 @@ class BotController:
         return f"{partner}，我们需要同时存活，并避免公开暴露恋人关系。"
 
     @staticmethod
+    def _visible_label(view: PlayerView, player_id: str, name: str) -> str:
+        """Use the same stable seat label as the judge when a seat map is available."""
+        seat = next(
+            (
+                seat_number
+                for mapped_id, seat_number, _ in view.seat_players
+                if mapped_id == player_id
+            ),
+            0,
+        )
+        if not seat:
+            return name
+        return f"Seat {seat} {name}" if view.language == "en" else f"{seat}号 {name}"
+
+    @staticmethod
     def _thought(view: PlayerView, request: ActionRequest) -> str:
         if view.language == "en":
             return f"Re-evaluate visible evidence before action {request.kind.value}."
         return f"在执行 {request.kind.value} 前重新检查自己的可见信息。"
+
+
+class SafeFallbackController:
+    """Deterministic, conservative fallback for explicitly non-strict games.
+
+    Public votes and optional irreversible abilities abstain. Mandatory private
+    abilities use the first legal option so a casual game can continue without
+    introducing additional randomness. Every such response is marked by the
+    judge before it is applied.
+    """
+
+    def act(self, view: PlayerView, request: ActionRequest) -> AgentResponse:
+        """Return the least destructive legal response for the requested action."""
+        if request.kind in {ActionKind.TEAM_CHAT, ActionKind.LOVER_CHAT}:
+            return AgentResponse(text="")
+        if request.kind in {ActionKind.SPEAK, ActionKind.LAST_WORDS}:
+            text = (
+                "(controller unavailable; remains silent)"
+                if view.language == "en"
+                else "（控制器不可用，本轮保持沉默）"
+            )
+            return AgentResponse(text=text)
+        if request.allow_abstain:
+            return AgentResponse(choice=None)
+        choice = request.options[0].value if request.options else None
+        return AgentResponse(choice=choice)
