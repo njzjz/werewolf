@@ -15,13 +15,13 @@ werewolf demo --players 8 --seed 7
 # 无需 API：电影 LOVERS 牌组
 werewolf demo --preset movie_lovers --seed 7
 
-# 生成“1 真人 + 7 LLM”配置
-werewolf init werewolf.json
+# 生成精简的“1 真人 + 7 LLM”推荐配置
+werewolf init
 export OPENAI_API_KEY='你的密钥'
-werewolf play --config werewolf.json
+werewolf play
 ```
 
-也可以不安装，直接使用 `python -m werewolf demo|init|play`。
+自定义路径也可以直接写成 `werewolf play my-game.json`。不安装时使用 `python -m werewolf demo|init|play`。
 
 ## 核心能力
 
@@ -51,44 +51,53 @@ werewolf play --config werewolf.json
 
 ## 配置与运行
 
-`werewolf init` 会生成完整 JSON。最常用的 provider 配置如下：
+`werewolf init` 默认只生成真正需要确认的内容：provider、模型和玩家。单 provider 会自动分配给所有未显式指定 provider 的 LLM 玩家，字符串玩家默认就是 LLM，因此常用配置可以很短：
 
 ```json
 {
-  "base_url": "https://api.openai.com/v1",
-  "api_key_env": "OPENAI_API_KEY",
-  "model": "your-model-id",
-  "wire_api": "responses",
-  "reasoning_effort": "low",
-  "use_json_mode": false,
-  "stream": true,
-  "timeout": 300,
-  "max_tokens": 2000,
-  "prompt_cache": false
+  "providers": {
+    "default": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "model": "your-model-id"
+    }
+  },
+  "players": [
+    {"name": "你", "controller": "human"},
+    "智能体1",
+    "智能体2",
+    "智能体3",
+    "智能体4",
+    "智能体5",
+    "智能体6",
+    "智能体7"
+  ]
 }
 ```
 
-推荐通过 `api_key_env` 注入密钥。`werewolf init` 生成的配置已经默认开启安全进度、严格控制器、两次重试、公开日志和私密恢复点：
+未写出的选项采用推荐值：中文、经典牌组、随机座位、安全进度、严格控制器、两次重试、公开日志 `game_runs/public.log` 和私密恢复点 `game_runs/private.checkpoint.json`。因此正常开局只需要：
 
 ```bash
-werewolf play --config movie.json --spectator --strict-controllers \
-  --controller-retries 2 \
-  --transcript game_runs/movie_public.log \
-  --checkpoint game_runs/movie_private.checkpoint.json
-
-tail -f game_runs/movie_public.log
+werewolf play
 ```
 
-恢复中止对局：
+身份牌可以通过计数自由组合，程序会洗牌后发给玩家：
 
-```bash
-werewolf play --config movie.json \
-  --resume game_runs/movie_private.checkpoint.json
+```json
+{
+  "roles": {
+    "werewolf": 2,
+    "villager": 3,
+    "seer": 1,
+    "witch": 1,
+    "hunter": 1
+  }
+}
 ```
 
-每次控制器成功返回后都会写入动作日志。恢复时只重新请求第一个未完成动作，已完成的公开发言、投票和私密响应由恢复日志重放。
+如果主持人希望指定个别身份，只需在对应玩家上增加 `"fixed_role": "seer"`；其余玩家继续从剩余牌堆随机抽取。`werewolf init --full` 可生成包含全部桌规、provider 和运行选项的参考模板。
 
-如果只是休闲体验并希望在 provider 长时间不可用时继续游戏，可以显式使用 `--allow-fallback`。安全后备会公开标识降级，投票、女巫用药和猎人开枪默认弃权；必须执行的私密能力采用第一个合法选项，不再随机改变关键局势。终局会汇总失败、重试和后备次数，并说明本局是否满足完整 LLM 对局标准。
+恢复中止对局使用 `werewolf play --resume game_runs/private.checkpoint.json`。每次控制器成功返回后都会写入动作日志；恢复时只重新请求第一个未完成动作。
 
 Provider 字段、Prompt Caching、真人终端、观战、恢复点和记忆导出见 [配置与运行](docs/configuration.md)。
 

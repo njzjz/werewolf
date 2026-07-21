@@ -19,6 +19,7 @@ from werewolf.config import (
     demo_config,
     example_config,
     load_config,
+    recommended_config,
 )
 from werewolf.engine import DeathCause, Game, role_deck
 from werewolf.models import (
@@ -611,18 +612,126 @@ def test_checkpoint_restores_the_independent_discussion_rng(tmp_path) -> None:
         for player in resumed_legacy._discussion_order()  # noqa: SLF001
     ] == expected_legacy
 
-def test_generated_config_defaults_to_recoverable_strict_play() -> None:
-    """New users should receive safe live-game defaults without extra CLI flags."""
+
+def test_generated_config_uses_recommended_defaults_without_listing_them(
+    tmp_path: Path,
+) -> None:
+    """The concise template should load safe defaults without configuration noise."""
+    raw = recommended_config()
+    path = tmp_path / "werewolf.json"
+    path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+    config = load_config(path)
+
+    assert set(raw) == {"providers", "players"}
+    assert config.spectator_progress is True
+    assert config.strict_controllers is True
+    assert config.controller_retries == 2
+    assert config.checkpoint_path == "game_runs/private.checkpoint.json"
+    assert config.public_transcript_path == "game_runs/public.log"
+    assert config.parallel_llm_votes is True
+    assert config.human_strategy_notes is False
+    assert config.players[1].provider == "default"
+
+
+def test_full_example_config_remains_available_for_advanced_options() -> None:
+    """Advanced users should still be able to generate every supported field."""
     config = example_config()
 
     assert config["spectator_progress"] is True
-    assert config["strict_controllers"] is True
-    assert config["controller_retries"] == 2
     assert config["checkpoint_path"] == "game_runs/private.checkpoint.json"
-    assert config["public_transcript_path"] == "game_runs/public.log"
-    assert config["parallel_llm_votes"] is True
-    assert config["human_strategy_notes"] is False
+    assert config["roles"] is None
+    assert config["rules"]["randomize_seating"] is True
     assert config["providers"]["default"]["max_tokens"] == 2000
+
+
+def test_custom_role_counts_and_partial_fixed_roles_are_supported(
+    tmp_path: Path,
+) -> None:
+    """Hosts may define a shuffled deck and pin only selected identities."""
+    path = tmp_path / "custom.json"
+    path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "local": {
+                        "base_url": "https://example.invalid/v1",
+                        "model": "test",
+                    },
+                },
+                "roles": {
+                    "werewolf": 2,
+                    "villager": 2,
+                    "seer": 1,
+                    "witch": 1,
+                },
+                "players": [
+                    {
+                        "name": "主持人",
+                        "controller": "human",
+                        "fixed_role": "seer",
+                    },
+                    "智能体1",
+                    "智能体2",
+                    "智能体3",
+                    "智能体4",
+                    "智能体5",
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+    game = Game(config, terminal=SilentTerminal())
+
+    assert config.players[1].provider == "local"
+    assert Counter(player.role for player in game.players) == Counter(config.roles)
+    host = next(player for player in game.players if player.name == "主持人")
+    assert host.role is Role.SEER
+
+
+def test_partial_fixed_roles_also_work_with_a_builtin_preset() -> None:
+    """Pinned identities should consume matching cards from a preset deck."""
+    base = fixed_config()
+    players = tuple(
+        replace(
+            player,
+            fixed_role=Role.SEER if index == 0 else None,
+        )
+        for index, player in enumerate(base.players)
+    )
+    config = replace(base, players=players)
+
+    game = Game(config, terminal=SilentTerminal())
+
+    assert game.players[0].role is Role.SEER
+    assert Counter(player.role for player in game.players) == Counter(role_deck(6))
+
+
+def test_custom_role_count_must_match_players(tmp_path: Path) -> None:
+    """A custom deck with missing cards should fail before the game starts."""
+    path = tmp_path / "invalid.json"
+    path.write_text(
+        json.dumps(
+            {
+                "roles": {"werewolf": 1, "villager": 4},
+                "players": [
+                    {"name": "真人", "controller": "human"},
+                    *(
+                        {"name": f"机器人{index}", "controller": "bot"}
+                        for index in range(1, 6)
+                    ),
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="custom roles deck must match"):
+        load_config(path)
 
 
 def test_checkpoint_replays_each_completed_controller_call(tmp_path) -> None:

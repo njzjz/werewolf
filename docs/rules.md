@@ -80,12 +80,12 @@
 
 ## 固定身份与随机种子
 
-`seed` 只影响程序随机性，不能固定真实 LLM 输出。`fixed_role` 仅用于测试或主持人预设，并且必须给所有玩家同时设置；读取配置的人会直接看到身份，正常游戏不应使用。
+`seed` 只影响程序随机性，不能固定真实 LLM 输出。顶层 `roles` 可以用身份计数自由定义整副牌，程序会在开局洗牌；`fixed_role` 可只设置给部分玩家，其余玩家从牌堆剩余身份中随机抽取。读取配置的人会直接看到固定身份，因此它适合测试或主持人预设，普通未知身份对局应只设置 `roles`。
 
 可直接运行以下真人加本地 bot 示例：
 
 ```bash
-werewolf play --config examples/movie_lovers.json
-werewolf play --config examples/movie_crazy_fox.json
-werewolf play --config examples/movie_mad_land.json
+werewolf play examples/movie_lovers.json
+werewolf play examples/movie_crazy_fox.json
+werewolf play examples/movie_mad_land.json
 ```
