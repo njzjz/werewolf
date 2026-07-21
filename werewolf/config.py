@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ ROLE_PRESET_SIZES: dict[str, int | None] = {
 }
 MIN_PLAYERS = 6
 MAX_PLAYERS = 16
+RECOMMENDED_PUBLIC_TRANSCRIPT_PATH = "game_runs/public.log"
+RECOMMENDED_CHECKPOINT_PATH = "game_runs/private.checkpoint.json"
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,7 @@ class GameConfig:
     memory_directory: str | None = "game_memories"
     context_char_limit: int = 24000
     role_preset: str = "classic"
+    roles: tuple[Role, ...] | None = None
     spectator_progress: bool = True
     strict_controllers: bool = True
     controller_retries: int = 2
@@ -132,16 +136,72 @@ def _provider_from_dict(raw: dict[str, Any]) -> LLMProviderConfig:
     )
 
 
-def _player_from_dict(raw: dict[str, Any]) -> PlayerConfig:
+def _player_from_dict(
+    raw: dict[str, Any],
+    *,
+    default_provider: str | None,
+) -> PlayerConfig:
     fixed_role = raw.get("fixed_role")
+    controller = str(raw.get("controller", "llm")).lower()
+    provider = raw.get("provider")
+    if controller == "llm" and provider is None:
+        provider = default_provider
     return PlayerConfig(
         name=str(raw["name"]).strip(),
-        controller=str(raw.get("controller", "llm")).lower(),
-        provider=raw.get("provider"),
+        controller=controller,
+        provider=provider,
         persona=str(raw.get("persona", "")),
         skills=tuple(str(value) for value in raw.get("skills", ["logic", "memory"])),
         fixed_role=Role(fixed_role) if fixed_role else None,
     )
+
+
+def _player_from_value(
+    raw: object,
+    *,
+    default_provider: str | None,
+) -> PlayerConfig:
+    """Expand a player name shorthand or parse a full player object."""
+    if isinstance(raw, str):
+        raw = {"name": raw}
+    if not isinstance(raw, dict):
+        msg = "Each player must be a name string or a JSON object"
+        raise TypeError(msg)
+    return _player_from_dict(raw, default_provider=default_provider)
+
+
+def _roles_from_value(raw: object) -> tuple[Role, ...] | None:
+    """Parse an optional custom shuffled deck from role counts or a role list."""
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        return tuple(Role(str(value)) for value in raw)
+    if not isinstance(raw, dict):
+        msg = "roles must be an object of role counts or a list of role names"
+        raise TypeError(msg)
+    unknown = sorted(set(raw) - {role.value for role in Role})
+    if unknown:
+        msg = f"Unknown roles: {', '.join(str(value) for value in unknown)}"
+        raise ValueError(msg)
+    roles: list[Role] = []
+    for role in Role:
+        count = raw.get(role.value, 0)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            msg = f"Role count for {role.value!r} must be a non-negative integer"
+            raise ValueError(msg)
+        roles.extend([role] * count)
+    return tuple(roles)
+
+
+def _default_provider_name(
+    providers: dict[str, LLMProviderConfig],
+) -> str | None:
+    """Choose the conventional or sole provider for concise player entries."""
+    if "default" in providers:
+        return "default"
+    if len(providers) == 1:
+        return next(iter(providers))
+    return None
 
 
 def load_config(path: str | Path) -> GameConfig:
@@ -153,10 +213,19 @@ def load_config(path: str | Path) -> GameConfig:
         str(name): _provider_from_dict(value)
         for name, value in raw.get("providers", {}).items()
     }
+    default_provider = _default_provider_name(providers)
     rules = RuleConfig(**raw.get("rules", {}))
+    public_transcript_path = raw.get(
+        "public_transcript_path",
+        RECOMMENDED_PUBLIC_TRANSCRIPT_PATH,
+    )
+    checkpoint_path = raw.get("checkpoint_path", RECOMMENDED_CHECKPOINT_PATH)
     config = GameConfig(
         language=str(raw.get("language", "zh-CN")),
-        players=tuple(_player_from_dict(player) for player in raw["players"]),
+        players=tuple(
+            _player_from_value(player, default_provider=default_provider)
+            for player in raw["players"]
+        ),
         providers=providers,
         rules=rules,
         seed=raw.get("seed"),
@@ -164,19 +233,14 @@ def load_config(path: str | Path) -> GameConfig:
         memory_directory=raw.get("memory_directory", "game_memories"),
         context_char_limit=int(raw.get("context_char_limit", 24000)),
         role_preset=str(raw.get("role_preset", "classic")),
+        roles=_roles_from_value(raw.get("roles")),
         spectator_progress=bool(raw.get("spectator_progress", True)),
         strict_controllers=bool(raw.get("strict_controllers", True)),
         controller_retries=int(raw.get("controller_retries", 2)),
         public_transcript_path=(
-            str(raw["public_transcript_path"])
-            if raw.get("public_transcript_path") is not None
-            else None
+            str(public_transcript_path) if public_transcript_path is not None else None
         ),
-        checkpoint_path=(
-            str(raw["checkpoint_path"])
-            if raw.get("checkpoint_path") is not None
-            else None
-        ),
+        checkpoint_path=(str(checkpoint_path) if checkpoint_path is not None else None),
         human_strategy_notes=bool(raw.get("human_strategy_notes", False)),
         confirm_critical_actions=bool(raw.get("confirm_critical_actions", True)),
         parallel_llm_votes=bool(raw.get("parallel_llm_votes", True)),
@@ -201,18 +265,25 @@ def validate_config(config: GameConfig) -> None:
         msg = "Player names must be non-empty and unique"
         raise ValueError(msg)
     fixed = [player.fixed_role for player in config.players if player.fixed_role]
-    if fixed and len(fixed) != len(config.players):
-        msg = "fixed_role must be specified for every player or for none of them"
-        raise ValueError(msg)
-    if not fixed:
+    if config.roles is not None:
+        if len(config.roles) != len(config.players):
+            msg = "The custom roles deck must match the number of players"
+            raise ValueError(msg)
+        _validate_role_set(config.roles, label="custom roles deck")
+        available = Counter(config.roles)
+        for role in fixed:
+            available[role] -= 1
+            if available[role] < 0:
+                msg = f"fixed_role {role.value!r} exceeds the custom roles deck"
+                raise ValueError(msg)
+    elif len(fixed) != len(config.players):
         expected_size = ROLE_PRESET_SIZES[config.role_preset]
         if expected_size is not None and len(config.players) != expected_size:
             msg = f"role_preset {config.role_preset!r} requires {expected_size} players"
             raise ValueError(msg)
     else:
-        if fixed.count(Role.SHARED) not in {0, 2}:
-            msg = "A fixed role set must contain zero or two Shared Players"
-            raise ValueError(msg)
+        _validate_role_set(tuple(fixed), label="fixed role set")
+    if fixed:
         singleton_roles = {
             Role.SEER,
             Role.WITCH,
@@ -277,8 +348,52 @@ def validate_config(config: GameConfig) -> None:
         raise ValueError(msg)
 
 
+def _validate_role_set(roles: tuple[Role, ...], *, label: str) -> None:
+    """Validate invariants that apply to a complete custom or fixed deck."""
+    wolves = roles.count(Role.WEREWOLF)
+    if wolves < 1 or wolves >= len(roles):
+        msg = f"The {label} must contain at least one Werewolf and one non-Werewolf"
+        raise ValueError(msg)
+    if roles.count(Role.SHARED) not in {0, 2}:
+        msg = f"The {label} must contain zero or two Shared Players"
+        raise ValueError(msg)
+    singleton_roles = {
+        Role.SEER,
+        Role.WITCH,
+        Role.HUNTER,
+        Role.MEDIUM,
+        Role.BODYGUARD,
+        Role.FOX,
+        Role.CUPID,
+    }
+    duplicated = sorted(role.value for role in singleton_roles if roles.count(role) > 1)
+    if duplicated:
+        msg = f"The {label} contains duplicate singleton roles: {', '.join(duplicated)}"
+        raise ValueError(msg)
+    if Role.FOX in roles and Role.CUPID in roles:
+        msg = f"The {label} cannot combine Fox and Cupid endgames"
+        raise ValueError(msg)
+
+
+def recommended_config() -> dict[str, Any]:
+    """Return the concise configuration written by the default init command."""
+    return {
+        "providers": {
+            "default": {
+                "base_url": "https://api.openai.com/v1",
+                "api_key_env": "OPENAI_API_KEY",
+                "model": "your-model-id",
+            },
+        },
+        "players": [
+            {"name": "你", "controller": "human"},
+            *(f"智能体{index}" for index in range(1, 8)),
+        ],
+    }
+
+
 def example_config() -> dict[str, Any]:
-    """Return a documented starting point with one human and seven LLMs."""
+    """Return the exhaustive reference template retained for advanced users."""
     players: list[dict[str, Any]] = [
         {
             "name": "你",
@@ -304,6 +419,7 @@ def example_config() -> dict[str, Any]:
         "memory_directory": "game_memories",
         "context_char_limit": 24000,
         "role_preset": "classic",
+        "roles": None,
         "spectator_progress": True,
         "strict_controllers": True,
         "controller_retries": 2,
@@ -315,6 +431,7 @@ def example_config() -> dict[str, Any]:
         "providers": {
             "default": {
                 "base_url": "https://api.openai.com/v1",
+                "api_key": None,
                 "api_key_env": "OPENAI_API_KEY",
                 "model": "gpt-4.1-mini",
                 "temperature": 0.7,
@@ -322,9 +439,12 @@ def example_config() -> dict[str, Any]:
                 "max_tokens": 2000,
                 "use_json_mode": True,
                 "wire_api": "chat",
+                "reasoning_effort": None,
+                "force_ipv4": False,
                 "stream": False,
                 "prompt_cache": False,
                 "prompt_cache_retention": None,
+                "extra_headers": {},
             },
         },
         "rules": asdict(RuleConfig()),
@@ -332,14 +452,20 @@ def example_config() -> dict[str, Any]:
     }
 
 
-def write_example_config(path: str | Path, *, force: bool = False) -> Path:
+def write_example_config(
+    path: str | Path,
+    *,
+    force: bool = False,
+    full: bool = False,
+) -> Path:
     """Write an example without overwriting user data by default."""
     config_path = Path(path)
     if config_path.exists() and not force:
         msg = f"Configuration already exists: {config_path}"
         raise FileExistsError(msg)
+    payload = example_config() if full else recommended_config()
     config_path.write_text(
-        json.dumps(example_config(), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     return config_path

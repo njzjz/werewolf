@@ -1,75 +1,104 @@
 # 配置与运行
 
-`werewolf init werewolf.json` 会生成一份可直接修改的完整配置。密钥应通过环境变量读取，不要写入 JSON、日志或记忆文件。
+`werewolf init` 默认生成一份精简推荐配置；确认 provider、模型和玩家后即可运行 `werewolf play`。需要查看或修改全部高级字段时使用 `werewolf init --full`。密钥应通过环境变量读取，不要写入 JSON、日志或记忆文件。
 
-## 最小示例
+## 推荐配置
 
 ```json
 {
-  "language": "zh-CN",
-  "role_preset": "classic",
-  "seed": null,
-  "clear_screen": true,
-  "memory_directory": "game_memories",
-  "context_char_limit": 24000,
-  "spectator_progress": true,
-  "strict_controllers": true,
-  "controller_retries": 2,
-  "public_transcript_path": "game_runs/public.log",
-  "checkpoint_path": "game_runs/private.checkpoint.json",
-  "human_strategy_notes": false,
-  "confirm_critical_actions": true,
-  "parallel_llm_votes": true,
   "providers": {
     "default": {
       "base_url": "https://api.openai.com/v1",
       "api_key_env": "OPENAI_API_KEY",
-      "model": "your-model-id",
-      "wire_api": "responses",
-      "reasoning_effort": "low",
-      "use_json_mode": false,
-      "stream": true,
-      "timeout": 300,
-      "max_tokens": 2000,
-      "prompt_cache": false
+      "model": "your-model-id"
     }
   },
   "players": [
-    {
-      "name": "真人玩家",
-      "controller": "human",
-      "persona": "谨慎的证据派",
-      "skills": ["logic", "social", "memory"]
-    },
-    {
-      "name": "智能体02",
-      "controller": "llm",
-      "provider": "default",
-      "persona": "发言简洁，重视票型",
-      "skills": ["logic", "social", "deception", "memory"]
-    }
+    {"name": "你", "controller": "human"},
+    "智能体1",
+    "智能体2",
+    "智能体3",
+    "智能体4",
+    "智能体5",
+    "智能体6",
+    "智能体7"
   ]
 }
 ```
 
-## 顶层字段
+字符串形式的玩家默认使用 `llm` 控制器。只有一个 provider 时，它会自动分配给所有没有显式填写 `provider` 的 LLM 玩家。
+
+省略字段时会采用以下推荐值：
+
+| 行为 | 推荐值 |
+| --- | --- |
+| 语言与牌组 | 中文、`classic` |
+| 运行安全 | 安全进度开启、严格控制器、失败重试 2 次 |
+| 恢复与日志 | `game_runs/private.checkpoint.json`、`game_runs/public.log` |
+| 终端体验 | 清屏、关键选择确认、LLM 投票并发 |
+| 记忆 | 导出到 `game_memories/` |
+
+若不需要某项文件输出，可以显式设置 `"checkpoint_path": null`、`"public_transcript_path": null` 或 `"memory_directory": null`。全部字段及当前值可通过 `werewolf init --full` 查看。
+
+## 身份牌组
+
+省略牌组设置时使用经典牌组。内置电影牌组仍可通过 `role_preset` 选择：
+
+```json
+{
+  "role_preset": "movie_lovers"
+}
+```
+
+需要自由组合身份牌时，使用 `roles` 计数表；计数总和必须等于玩家人数：
+
+```json
+{
+  "roles": {
+    "werewolf": 2,
+    "villager": 3,
+    "seer": 1,
+    "witch": 1,
+    "hunter": 1
+  }
+}
+```
+
+支持的身份名为 `villager`、`werewolf`、`seer`、`witch`、`hunter`、`medium`、`bodyguard`、`madman`、`fox`、`cupid` 和 `shared`。共有者必须为 0 或 2 张；妖狐与丘比特不能同时启用；预言家、女巫等单例身份不能重复。
+
+整副牌默认洗牌。若主持人要指定少数玩家的身份，可只给这些玩家填写 `fixed_role`，未指定玩家继续从剩余牌堆随机抽取：
+
+```json
+{
+  "name": "主持人",
+  "controller": "human",
+  "fixed_role": "seer"
+}
+```
+
+固定身份会暴露给读取配置的人，适合主持人测试或有意设计的对局，不建议用于需要主持人也完全未知身份的普通游戏。
+
+`roles` 只覆盖身份组成；`role_preset` 仍决定经典或电影模式的存活奖金与牌组专项策略。自定义普通桌游通常保持默认 `classic`，需要电影生存结算时可同时指定相应电影 preset。
+
+## 高级顶层选项
+
+这些字段都可以省略，只在需要覆盖推荐行为时填写：
 
 | 字段 | 用途 |
 | --- | --- |
 | `language` | `zh-CN` 或 `en`；控制法官文本和 LLM 语言要求 |
-| `role_preset` | `classic` 或电影牌组名称 |
 | `seed` | 控制座位、身份洗牌、平票和本地 bot；不保证真实 LLM 输出可复现 |
 | `clear_screen` | 多真人共用终端时，在私密回合之间清屏 |
 | `context_char_limit` | 单个玩家可见历史进入 LLM 提示词的字符上限 |
-| `memory_directory` | 终局后导出每名玩家的独立记忆；设为 `null` 可关闭 |
+| `memory_directory` | 终局后导出每名玩家的独立记忆 |
 | `spectator_progress` | 显示不泄密的行动进度和单行推理耗时 |
-| `strict_controllers` | LLM 重试耗尽后终止并保留恢复点；新配置默认开启 |
+| `strict_controllers` | LLM 重试耗尽后终止并保留恢复点 |
 | `controller_retries` | 严格终止前，对同一个 LLM 动作的重试次数 |
 | `public_transcript_path` | 实时写入可公开分享的 UTF-8 观战日志 |
 | `checkpoint_path` | 保存含私密状态和响应日志的恢复点 |
-| `human_strategy_notes` | 每次真人行动后是否询问可选的私密策略笔记；默认关闭 |
+| `human_strategy_notes` | 真人行动后是否询问可选的私密策略笔记 |
 | `confirm_critical_actions` | 投票、用药、开枪、查验等真人选择是否二次确认 |
-| `parallel_llm_votes` | 并行请求互不可见的 LLM 公开投票；按座位顺序写入恢复日志 |
+| `parallel_llm_votes` | 并行请求互不可见的 LLM 公开投票 |
 
 ## 玩家控制器
 
@@ -77,7 +106,7 @@
 - `llm`：调用指定 provider；每次只发送该玩家已经获权的个人视图。
 - `bot`：不访问网络的简单本地机器人，用于演示和测试，不代表 LLM 水平。
 
-玩家配置中的 `persona` 进入该玩家的稳定系统提示。`skills` 可选择：
+对象形式的玩家可以设置 `persona`、`skills`、`provider` 和 `fixed_role`。`persona` 进入该玩家的稳定系统提示。`skills` 可选择：
 
 - `logic`：追踪事实、声明、票型和矛盾。
 - `social`：观察站边、关系变化和表达方式。
@@ -126,11 +155,17 @@ Responses provider 可选：
 
 ## 观战、严格模式与恢复
 
-正式的纯 LLM 对局建议：
+精简配置已经默认开启安全进度、严格模式、两次重试、公开日志和恢复点，因此正式对局通常直接运行：
 
 ```bash
-werewolf play --config movie.json --spectator --strict-controllers \
-  --controller-retries 2 \
+werewolf play movie.json
+tail -f game_runs/public.log
+```
+
+只有临时覆盖配置时才需要附加参数，例如为这一局改用独立文件：
+
+```bash
+werewolf play movie.json \
   --transcript game_runs/movie_public.log \
   --checkpoint game_runs/movie_private.checkpoint.json
 ```
@@ -144,7 +179,7 @@ tail -f game_runs/movie_public.log
 恢复中止对局：
 
 ```bash
-werewolf play --config movie.json \
+werewolf play movie.json \
   --resume game_runs/movie_private.checkpoint.json
 ```
 

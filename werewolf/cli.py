@@ -12,6 +12,14 @@ from .config import ROLE_PRESET_SIZES, demo_config, load_config, write_example_c
 from .engine import Game
 
 
+def _config_path_from_args(args: argparse.Namespace) -> str:
+    """Resolve the concise positional path while retaining --config compatibility."""
+    if args.config_path and args.config_option:
+        msg = "配置路径只能通过位置参数或 --config 指定一次"
+        raise ValueError(msg)
+    return str(args.config_path or args.config_option or "werewolf.json")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Create the public CLI parser."""
     parser = argparse.ArgumentParser(
@@ -23,9 +31,23 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser = subparsers.add_parser("init", help="生成一份 JSON 配置模板")
     init_parser.add_argument("path", nargs="?", default="werewolf.json")
     init_parser.add_argument("--force", action="store_true", help="覆盖已有文件")
+    init_parser.add_argument(
+        "--full",
+        action="store_true",
+        help="生成包含全部高级选项的完整参考模板",
+    )
 
     play_parser = subparsers.add_parser("play", help="按配置开始游戏")
-    play_parser.add_argument("--config", default="werewolf.json", help="JSON 配置路径")
+    play_parser.add_argument(
+        "config_path",
+        nargs="?",
+        help="JSON 配置路径；默认 werewolf.json",
+    )
+    play_parser.add_argument(
+        "--config",
+        dest="config_option",
+        help="JSON 配置路径（兼容旧用法）",
+    )
     play_parser.add_argument(
         "--no-clear",
         action="store_true",
@@ -113,18 +135,26 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     resume_checkpoint: str | None = None
     active_checkpoint: str | None = None
+    config_path = "werewolf.json"
     try:
         if args.command == "init":
-            path = write_example_config(args.path, force=args.force)
+            path = write_example_config(args.path, force=args.force, full=args.full)
             print(f"已生成配置：{path}")
-            print("请设置 OPENAI_API_KEY，并按需修改 base_url、model 和玩家列表。")
+            if args.full:
+                print("已生成完整参考模板；常规开局通常只需精简模板。")
+            else:
+                print(
+                    "请设置 OPENAI_API_KEY，确认 model 和玩家列表后运行："
+                    f"werewolf play {path}",
+                )
             return
         if args.command == "demo":
             preset_size = ROLE_PRESET_SIZES[args.preset]
             player_count = args.players or preset_size or 8
             config = demo_config(player_count, args.seed, args.preset)
         else:
-            config = load_config(Path(args.config))
+            config_path = _config_path_from_args(args)
+            config = load_config(Path(config_path))
             if args.no_clear:
                 config = replace(config, clear_screen=False)
             if args.no_memory:
@@ -197,7 +227,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"错误：{exc}", file=sys.stderr)
         if active_checkpoint and Path(active_checkpoint).exists():
             print(
-                f"恢复点已保留，可运行：werewolf play --config {args.config} "
+                f"恢复点已保留，可运行：werewolf play {config_path} "
                 f"--resume {active_checkpoint}",
                 file=sys.stderr,
             )

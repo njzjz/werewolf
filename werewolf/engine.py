@@ -273,6 +273,11 @@ class Game:
         return {
             "language": self.config.language,
             "role_preset": self.config.role_preset,
+            "roles": (
+                [role.value for role in self.config.roles]
+                if self.config.roles is not None
+                else None
+            ),
             "rules": asdict(self.config.rules),
             "players": [
                 {
@@ -532,16 +537,31 @@ class Game:
 
     def _roles(self, seats: list[PlayerConfig]) -> list[Role]:
         fixed = [player.fixed_role for player in seats]
-        if all(role is not None for role in fixed):
-            roles = [role for role in fixed if role is not None]
-            wolves = sum(role is Role.WEREWOLF for role in roles)
-            if wolves < 1 or wolves >= len(roles):
-                msg = "A fixed role set must contain both factions"
+        if self.config.roles is not None:
+            deck = list(self.config.roles)
+        elif all(role is not None for role in fixed):
+            return [role for role in fixed if role is not None]
+        else:
+            deck = role_deck(len(self.config.players), self.config.role_preset)
+
+        # Hosts may pin any subset of players while leaving the remaining
+        # cards shuffled. Subtract pinned cards from the configured deck first
+        # so a fixed identity never creates an extra copy of that role.
+        remaining = Counter(deck)
+        for role in fixed:
+            if role is None:
+                continue
+            remaining[role] -= 1
+            if remaining[role] < 0:
+                msg = (
+                    f"fixed_role {role.value!r} is unavailable in the configured "
+                    "role deck"
+                )
                 raise ValueError(msg)
-            return roles
-        roles = role_deck(len(self.config.players), self.config.role_preset)
-        self.rng.shuffle(roles)
-        return roles
+        shuffled = [role for role in Role for _ in range(remaining[role])]
+        self.rng.shuffle(shuffled)
+        choices = iter(shuffled)
+        return [role if role is not None else next(choices) for role in fixed]
 
     def _controller_for(
         self,
