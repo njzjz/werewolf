@@ -241,12 +241,31 @@ def test_daily_discussion_uses_a_seeded_circular_starting_seat() -> None:
     order = game._discussion_order()  # noqa: SLF001
 
     assert [player.player_id for player in order] == [
+        "p6",
+        "p1",
         "p2",
         "p3",
         "p4",
         "p5",
-        "p6",
-        "p1",
+    ]
+
+
+def test_discussion_start_is_independent_from_private_action_randomness() -> None:
+    """Secret night branches must not shift the public discussion start."""
+    baseline = Game(fixed_config(), terminal=SilentTerminal())
+    night_branch = Game(fixed_config(), terminal=SilentTerminal())
+
+    # Controllers, tie-breaking, and role resolution use the main RNG. A
+    # different secret night path may consume an arbitrary number of draws.
+    for _ in range(10):
+        night_branch.rng.random()
+
+    assert [
+        player.player_id
+        for player in baseline._discussion_order()  # noqa: SLF001
+    ] == [
+        player.player_id
+        for player in night_branch._discussion_order()  # noqa: SLF001
     ]
 
 
@@ -541,6 +560,56 @@ def test_parallel_votes_remain_replayable_from_checkpoint(tmp_path) -> None:
     assert replayed_votes == original_votes
     assert all(len(controller.requests) == 1 for controller in controllers.values())
 
+
+def test_checkpoint_restores_the_independent_discussion_rng(tmp_path) -> None:
+    """A resumed game should retain the next public discussion draw."""
+    checkpoint = tmp_path / "private.checkpoint.json"
+    config = replace(fixed_config(), checkpoint_path=str(checkpoint))
+    game = Game(config, terminal=SilentTerminal())
+
+    game._discussion_order()  # noqa: SLF001 - consume the first day's draw.
+    game._save_checkpoint(next_day=2, next_step="daytime")  # noqa: SLF001
+    expected = [
+        player.player_id
+        for player in game._discussion_order()  # noqa: SLF001
+    ]
+
+    resumed = Game(
+        config,
+        terminal=SilentTerminal(),
+        resume_checkpoint=checkpoint,
+    )
+
+    assert [
+        player.player_id
+        for player in resumed._discussion_order()  # noqa: SLF001
+    ] == expected
+
+    # Legacy compatibility: checkpoints written before discussion RNG isolation do
+    # not include `discussion_rng_state`. They should fall back to the saved main
+    # RNG state, preserving the next public discussion draw from the legacy stream.
+    legacy_checkpoint = tmp_path / "legacy.checkpoint.json"
+    raw = json.loads(checkpoint.read_text(encoding="utf-8"))
+    legacy_rng = __import__("random").Random(config.seed)
+    legacy_rng.randrange(len(game.players))  # Simulate day-1 discussion draw.
+    legacy_state = legacy_rng.getstate()
+    raw["rng_state"] = [legacy_state[0], list(legacy_state[1]), legacy_state[2]]
+    raw.pop("discussion_rng_state", None)
+    legacy_checkpoint.write_text(json.dumps(raw), encoding="utf-8")
+
+    resumed_legacy = Game(
+        config,
+        terminal=SilentTerminal(),
+        resume_checkpoint=legacy_checkpoint,
+    )
+    legacy_start = legacy_rng.randrange(len(game.players))
+    alive_ids = [f"p{index}" for index in range(1, len(game.players) + 1)]
+    expected_legacy = [*alive_ids[legacy_start:], *alive_ids[:legacy_start]]
+
+    assert [
+        player.player_id
+        for player in resumed_legacy._discussion_order()  # noqa: SLF001
+    ] == expected_legacy
 
 def test_generated_config_defaults_to_recoverable_strict_play() -> None:
     """New users should receive safe live-game defaults without extra CLI flags."""
