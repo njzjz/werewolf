@@ -199,6 +199,13 @@ class Game:
         validate_config(config)
         self.config = config
         self.rng = random.Random(config.seed)  # noqa: S311 - game simulation, not security.
+        # Public turn scheduling must not share state with controllers and
+        # private night resolution. Otherwise a secret action path can shift
+        # the publicly observed discussion order even when nobody dies.
+        discussion_seed = (
+            None if config.seed is None else f"werewolf-discussion:{config.seed}"
+        )
+        self._discussion_rng = random.Random(discussion_seed)  # noqa: S311
         self.terminal = terminal or Terminal(
             clear_screen=config.clear_screen,
             transcript_path=config.public_transcript_path,
@@ -285,6 +292,7 @@ class Game:
     ) -> dict[str, object]:
         """Serialize one safe phase boundary without provider credentials."""
         rng_state = self.rng.getstate()
+        discussion_rng_state = self._discussion_rng.getstate()
         transcript_path = (
             str(self.terminal.transcript_path.resolve())
             if self.terminal.transcript_path is not None
@@ -305,6 +313,11 @@ class Game:
             "fallback_records": [asdict(item) for item in self._fallback_records],
             "last_nonterminal_snapshot": self._last_nonterminal_snapshot,
             "rng_state": [rng_state[0], list(rng_state[1]), rng_state[2]],
+            "discussion_rng_state": [
+                discussion_rng_state[0],
+                list(discussion_rng_state[1]),
+                discussion_rng_state[2],
+            ],
             "transcript": {
                 "path": transcript_path,
                 "size": self.terminal.transcript_size(),
@@ -456,6 +469,17 @@ class Game:
         )
         rng_state = raw["rng_state"]
         self.rng.setstate((int(rng_state[0]), tuple(rng_state[1]), rng_state[2]))
+        # Version-1 checkpoints written before discussion RNG isolation do not
+        # contain this field. Starting from the saved main RNG state preserves
+        # their next discussion draw while isolating all later scheduling.
+        discussion_rng_state = raw.get("discussion_rng_state", rng_state)
+        self._discussion_rng.setstate(
+            (
+                int(discussion_rng_state[0]),
+                tuple(discussion_rng_state[1]),
+                discussion_rng_state[2],
+            ),
+        )
         transcript = raw.get("transcript", {})
         expected_path = transcript.get("path")
         actual_path = (
@@ -1090,9 +1114,16 @@ class Game:
             self._player_label(speakers[0]) if speakers else self._t("无人", "nobody")
         )
         self._announce(
-            self._t(
-                f"第 {self.day} 天，开始公开讨论。本日从 {start_name} 起按座位顺序发言。",
-                f"Day {self.day}. Public discussion begins with {start_name} and proceeds in seat order.",
+            (
+                self._t(
+                    f"第 {self.day} 天，开始公开讨论。本日随机从 {start_name} 起按座位顺序发言。",
+                    f"Day {self.day}. Public discussion randomly begins with {start_name} and proceeds in seat order.",
+                )
+                if self.config.rules.randomize_discussion_start
+                else self._t(
+                    f"第 {self.day} 天，开始公开讨论。本日从 {start_name} 起按固定座位顺序发言。",
+                    f"Day {self.day}. Public discussion begins with {start_name} in fixed seat order.",
+                )
             ),
         )
         for player in speakers:
@@ -1170,11 +1201,11 @@ class Game:
         )
 
     def _discussion_order(self) -> list[PlayerState]:
-        """Rotate living seats around a random daily discussion starting point."""
+        """Rotate living seats using randomness isolated from private actions."""
         alive = list(self._alive())
         if len(alive) < 2 or not self.config.rules.randomize_discussion_start:
             return alive
-        start = self.rng.randrange(len(alive))
+        start = self._discussion_rng.randrange(len(alive))
         return [*alive[start:], *alive[:start]]
 
     def _collect_votes(
