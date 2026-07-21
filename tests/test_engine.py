@@ -585,6 +585,31 @@ def test_checkpoint_restores_the_independent_discussion_rng(tmp_path) -> None:
         for player in resumed._discussion_order()  # noqa: SLF001
     ] == expected
 
+    # Legacy compatibility: checkpoints written before discussion RNG isolation do
+    # not include `discussion_rng_state`. They should fall back to the saved main
+    # RNG state, preserving the next public discussion draw from the legacy stream.
+    legacy_checkpoint = tmp_path / "legacy.checkpoint.json"
+    raw = json.loads(checkpoint.read_text(encoding="utf-8"))
+    legacy_rng = __import__("random").Random(config.seed)
+    legacy_rng.randrange(len(game.players))  # Simulate day-1 discussion draw.
+    legacy_state = legacy_rng.getstate()
+    raw["rng_state"] = [legacy_state[0], list(legacy_state[1]), legacy_state[2]]
+    raw.pop("discussion_rng_state", None)
+    legacy_checkpoint.write_text(json.dumps(raw), encoding="utf-8")
+
+    resumed_legacy = Game(
+        config,
+        terminal=SilentTerminal(),
+        resume_checkpoint=legacy_checkpoint,
+    )
+    legacy_start = legacy_rng.randrange(len(game.players))
+    alive_ids = [f"p{index}" for index in range(1, len(game.players) + 1)]
+    expected_legacy = [*alive_ids[legacy_start:], *alive_ids[:legacy_start]]
+
+    assert [
+        player.player_id
+        for player in resumed_legacy._discussion_order()  # noqa: SLF001
+    ] == expected_legacy
 
 def test_generated_config_defaults_to_recoverable_strict_play() -> None:
     """New users should receive safe live-game defaults without extra CLI flags."""
