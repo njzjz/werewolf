@@ -45,7 +45,7 @@ class LLMProviderConfig:
     wire_api: str = "chat"
     reasoning_effort: str | None = None
     force_ipv4: bool = False
-    stream: bool = False
+    stream: bool = True
     prompt_cache: bool = False
     prompt_cache_retention: str | None = None
     extra_headers: dict[str, str] = field(default_factory=dict)
@@ -129,7 +129,7 @@ def _provider_from_dict(raw: dict[str, Any]) -> LLMProviderConfig:
         wire_api=str(raw.get("wire_api", "chat")),
         reasoning_effort=raw.get("reasoning_effort"),
         force_ipv4=bool(raw.get("force_ipv4", False)),
-        stream=bool(raw.get("stream", False)),
+        stream=bool(raw.get("stream", True)),
         prompt_cache=bool(raw.get("prompt_cache", False)),
         prompt_cache_retention=raw.get("prompt_cache_retention"),
         extra_headers={str(k): str(v) for k, v in raw.get("extra_headers", {}).items()},
@@ -441,7 +441,7 @@ def example_config() -> dict[str, Any]:
                 "wire_api": "chat",
                 "reasoning_effort": None,
                 "force_ipv4": False,
-                "stream": False,
+                "stream": True,
                 "prompt_cache": False,
                 "prompt_cache_retention": None,
                 "extra_headers": {},

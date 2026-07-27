@@ -13,17 +13,20 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .models import (
     ActionKind,
+    ActionOption,
     ActionRequest,
     AgentResponse,
     MemoryEvent,
     PlayerView,
     Visibility,
+    seat_label,
 )
 
 try:
@@ -35,6 +38,46 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from .config import LLMProviderConfig
+
+ABSTAIN_ANSWERS = frozenset(
+    {
+        "null",
+        "none",
+        "nil",
+        "n/a",
+        "no",
+        "pass",
+        "skip",
+        "abstain",
+        "跳过",
+        "无",
+    },
+)
+ABSTAIN_PREFIXES = (
+    "弃权",
+    "不使用",
+    "不用",
+    "不开枪",
+    "不袭击",
+    "不投",
+    "不选",
+    "do not",
+    "don't",
+)
+AFFIRMATIVE_ANSWERS = frozenset(
+    {
+        "yes",
+        "y",
+        "true",
+        "use",
+        "confirm",
+        "是",
+        "是的",
+        "使用",
+        "确认",
+        "同意",
+    },
+)
 
 
 def _create_ipv4_connection(
@@ -108,6 +151,14 @@ class Controller(Protocol):
 
     def act(self, view: PlayerView, request: ActionRequest) -> AgentResponse:
         """Return one legal choice or a piece of speech."""
+
+
+@runtime_checkable
+class PrivateResultReceiver(Protocol):
+    """Controller that reads a judge result produced by its own action."""
+
+    def receive_private_result(self, view: PlayerView, text: str) -> None:
+        """Show one private result before this player releases the terminal."""
 
 
 class Terminal:
@@ -378,21 +429,58 @@ class HumanController:
             ActionKind.TEAM_CHAT,
             ActionKind.LOVER_CHAT,
         }:
-            text = self._read_text(view)
+            text = self._read_text(view, request)
             thought = self._thought(view) if self.ask_strategy_note else ""
-            self._handoff(view)
+            self._end_turn(view, request)
             return AgentResponse(text=text, thought=thought)
         choice = self._choose(view, request)
         thought = self._thought(view) if self.ask_strategy_note else ""
-        self._handoff(view)
+        self._end_turn(view, request)
         return AgentResponse(choice=choice, thought=thought)
 
-    def _read_text(self, view: PlayerView) -> str:
+    def _end_turn(self, view: PlayerView, request: ActionRequest) -> None:
+        """Hand off now, or wait for the result this action is about to produce."""
+        if request.returns_private_result:
+            return
+        self._handoff(view)
+
+    def receive_private_result(self, view: PlayerView, text: str) -> None:
+        """Show a result caused by this player's own action, then hand off.
+
+        A Seer who has to wait until their next turn effectively plays the
+        following discussion blind, so the judge delivers the result here,
+        while the terminal still belongs to the player who earned it.
+        """
+        if text:
+            title = (
+                "Result of your action"
+                if view.language == "en"
+                else "你本次行动的私密结果"
+            )
+            print(f"\n--- {title} ---\n{text}")
+            if sys.stdout.isatty():
+                prompt = (
+                    "Press Enter once you have read it..."
+                    if view.language == "en"
+                    else "阅读完毕后按回车继续……"
+                )
+                with suppress(EOFError):
+                    input(prompt)
+        self._handoff(view)
+
+    def _read_text(self, view: PlayerView, request: ActionRequest) -> str:
         """Read speech while reserving an explicit full-history command."""
         while True:
             text = input("> ").strip()
             if text == "/history":
                 self.terminal.full_history(view)
+                continue
+            if not text and request.requires_text:
+                print(
+                    "This action requires a statement; please enter one."
+                    if view.language == "en"
+                    else "本轮动作必须发言，请输入内容。",
+                )
                 continue
             return text
 
@@ -521,17 +609,60 @@ class OpenAICompatibleClient:
         self._record_usage(response)
         if self.config.wire_api == "responses":
             return self._responses_content(response)
+        return self._chat_content(response)
+
+    @classmethod
+    def _chat_content(cls, response: dict[str, Any]) -> str:
+        """Extract final text from common chat-completions response shapes.
+
+        Some OpenAI-compatible reasoning gateways leave ``content`` null and
+        place the requested structured result in ``reasoning_content``. Treat
+        that field strictly as a fallback so a normal final answer always wins
+        when a provider returns both fields.
+        """
         try:
-            content = response["choices"][0]["message"]["content"]
+            choice = response["choices"][0]
+            message = choice["message"]
         except (KeyError, IndexError, TypeError) as exc:
             msg = f"Malformed chat-completions response: {response!r}"
             raise RuntimeError(msg) from exc
+        content = cls._content_text(message.get("content"))
+        if content:
+            return content
+        reasoning_content = cls._content_text(message.get("reasoning_content"))
+        if reasoning_content:
+            return reasoning_content
+        raise RuntimeError(cls._empty_content_error(choice.get("finish_reason")))
+
+    @staticmethod
+    def _empty_content_error(finish_reason: object) -> str:
+        """Explain an empty answer so a silent player has a visible cause."""
+        if finish_reason == "length":
+            return (
+                "LLM stopped at the output limit before writing an answer "
+                "(finish_reason=length); raise the provider max_tokens."
+            )
+        if finish_reason == "content_filter":
+            return (
+                "LLM returned no answer because the provider content filter "
+                "stopped the response (finish_reason=content_filter)."
+            )
+        return (
+            "LLM returned an empty answer with no content or reasoning text "
+            f"(finish_reason={finish_reason!r})."
+        )
+
+    @staticmethod
+    def _content_text(content: object) -> str:
+        """Normalize string and multipart compatible-provider content."""
+        if isinstance(content, str):
+            return content
         if isinstance(content, list):
-            content = "".join(
+            return "".join(
                 str(part.get("text", "")) if isinstance(part, dict) else str(part)
                 for part in content
             )
-        return str(content)
+        return ""
 
     def _payload(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         """Build the request shape selected by the provider configuration."""
@@ -684,7 +815,23 @@ class OpenAICompatibleClient:
 
     def _post_stream(self, payload: dict[str, Any]) -> str:
         """Consume an SSE response incrementally and return assembled model text."""
-        stream_payload = {**payload, "stream": True}
+        stream_payload: dict[str, Any] = {**payload, "stream": True}
+        if self.config.wire_api == "responses":
+            return self._read_stream(stream_payload)
+        # Chat streams omit usage unless it is requested explicitly, and token
+        # accounting is the only way to observe provider cache behavior. Retry
+        # without the field for the compatible services that reject it.
+        try:
+            return self._read_stream(
+                {**stream_payload, "stream_options": {"include_usage": True}},
+            )
+        except RuntimeError as exc:
+            if "stream_options" not in str(exc):
+                raise
+            return self._read_stream(stream_payload)
+
+    def _read_stream(self, stream_payload: dict[str, Any]) -> str:
+        """Send one streaming request and assemble its assistant text."""
         request = self._request(stream_payload)
         try:
             with self._opener().open(
@@ -703,6 +850,8 @@ class OpenAICompatibleClient:
     def _stream_content(self, lines: Iterable[bytes]) -> str:
         """Extract assistant text deltas from Responses or Chat SSE events."""
         parts: list[str] = []
+        reasoning_parts: list[str] = []
+        finish_reason: object = None
         completed_response: dict[str, Any] | None = None
         stream_usage: dict[str, Any] | None = None
         for raw_line in lines:
@@ -742,15 +891,18 @@ class OpenAICompatibleClient:
             for choice in event.get("choices", []):
                 if not isinstance(choice, dict):
                     continue
-                content = choice.get("delta", {}).get("content")
-                if isinstance(content, str):
+                finish_reason = choice.get("finish_reason") or finish_reason
+                delta = choice.get("delta", {})
+                if not isinstance(delta, dict):
+                    continue
+                content = self._content_text(delta.get("content"))
+                if content:
                     parts.append(content)
-                elif isinstance(content, list):
-                    parts.extend(
-                        str(item.get("text", ""))
-                        for item in content
-                        if isinstance(item, dict)
-                    )
+                reasoning_content = self._content_text(
+                    delta.get("reasoning_content"),
+                )
+                if reasoning_content:
+                    reasoning_parts.append(reasoning_content)
         usage_recorded = (
             self._record_usage(completed_response)
             if completed_response is not None
@@ -760,10 +912,11 @@ class OpenAICompatibleClient:
             self._record_usage({"usage": stream_usage})
         if parts:
             return "".join(parts)
+        if reasoning_parts:
+            return "".join(reasoning_parts)
         if completed_response is not None:
             return self._responses_content(completed_response)
-        msg = "Streaming API completed without assistant text"
-        raise RuntimeError(msg)
+        raise RuntimeError(self._empty_content_error(finish_reason))
 
 
 class LLMController:
@@ -786,11 +939,66 @@ class LLMController:
         raw = self.client.complete(messages)
         data = self._parse_json(raw)
         return AgentResponse(
-            choice=self._optional_string(data.get("choice")),
+            choice=self._resolve_choice(data.get("choice"), request),
             text=self._optional_string(data.get("text")) or "",
             thought=self._optional_string(data.get("thought")) or "",
             note=self._optional_string(data.get("note")) or "",
         )
+
+    @classmethod
+    def _resolve_choice(cls, value: object, request: ActionRequest) -> str | None:
+        """Map a near-miss answer onto the single legal option it identifies.
+
+        Models routinely answer with the seat number, the rendered label, or
+        the player name instead of the opaque option value. Accepting those
+        spellings avoids discarding a decision the model clearly made, while
+        anything still ambiguous is returned unchanged so the judge rejects it.
+        """
+        raw = cls._optional_string(value)
+        if raw is None:
+            return None
+        legal = {option.value for option in request.options}
+        if raw in legal:
+            return raw
+        keys = cls._answer_keys(raw)
+        matched = {
+            option.value
+            for option in request.options
+            if keys & cls._option_aliases(option) or option.value in raw
+        }
+        if len(matched) == 1:
+            return matched.pop()
+        normalized = raw.casefold()
+        if request.allow_abstain and (
+            normalized in ABSTAIN_ANSWERS or normalized.startswith(ABSTAIN_PREFIXES)
+        ):
+            return None
+        if len(request.options) == 1 and normalized in AFFIRMATIVE_ANSWERS:
+            return request.options[0].value
+        return raw
+
+    @staticmethod
+    def _answer_keys(raw: str) -> set[str]:
+        """Return comparable spellings of one raw answer."""
+        normalized = raw.casefold()
+        keys = {normalized}
+        seat = re.fullmatch(r"(?:seat\s*)?(\d+)\s*(?:号)?", normalized)
+        if seat:
+            keys.add(seat.group(1))
+        return keys
+
+    @staticmethod
+    def _option_aliases(option: ActionOption) -> set[str]:
+        """Return the spellings a model may plausibly use for one option."""
+        label = option.label.strip()
+        aliases = {option.value.casefold(), label.casefold()}
+        seat = re.match(r"(?:seat\s*)?(\d+)", label, flags=re.IGNORECASE)
+        if seat:
+            aliases.add(seat.group(1))
+            name = label[seat.end() :].removeprefix("号").strip()
+            if name:
+                aliases.add(name.casefold())
+        return aliases
 
     def _messages(
         self,
@@ -812,13 +1020,20 @@ class LLMController:
             "你正在参加一局狼人杀。你只能依据下面提供的个人视图行动；未出现的信息对你不可见，"
             "不得假设或索取其他玩家的私密上下文。法官是确定性程序，必须服从合法选项；"
             "身份推演必须满足当前请求中的公开机械约束，尤其不能构造本应已经触发终局的存活狼坑。\n"
-            f"{language_rule}\n你的名字：{view.name}\n你的座位号：{view.seat_number or '未提供'}\n"
+            f"{language_rule}\n你在本局的公开称呼：{view.own_label}\n"
+            f"你的名字：{view.name}\n你的座位号：{view.seat_number or '未提供'}\n"
+            "自我介绍和任何自称都必须使用上面这个座位号，不要把自己的名字当成别人的座位号。\n"
             f"你的身份：{view.role_name}\n"
             f"身份说明：{view.role_description}\n人物设定：{self.persona or '自然参与游戏'}\n"
             f"恋人信息：{view.lover[1] if view.lover else '无'}\n"
             f"个人技能：\n{skills}\n"
-            "仅返回一个 JSON 对象：choice 是选项 value 或 null；text 是要公开或向指定私密频道发送的内容；"
-            "thought 是仅写入你个人记忆的简短策略与判断；note 可记录待验证事项。"
+            "只返回一个 JSON 对象，不要输出解释文字或多个对象，格式为："
+            '{"choice": 合法选项的 value 字符串或 null, "text": "公开或私密频道要发送的内容", '
+            '"thought": "只写入个人记忆的简短策略", "note": "待验证事项，可留空"}\n'
+            'choice 必须与合法选项里的某个 value 完全一致（例如 "p3"），不要填座位号、姓名或标签；'
+            "不允许弃权时不得填 null。\n"
+            "发言类动作的 text 不能为空，必须写出本轮真正要说的话；thought 与 note 请各自控制在 100 字以内，"
+            "以免输出预算被占满导致回答被截断。"
         )
         event_lines = [
             f"#{event.sequence} D{event.day}/{event.phase} [{event.visibility.value}] {event.text}"
@@ -851,8 +1066,13 @@ class LLMController:
             f"法官请求：{request.prompt}\n动作类型：{request.kind.value}\n"
             f"合法选项：{json.dumps(options, ensure_ascii=False)}\n"
             f"允许弃权：{request.allow_abstain}\n"
+            f"必须提供 text：{request.requires_text}\n"
             "对于发言类动作填写 text；对于选择类动作只把合法 value 填入 choice。"
         )
+        if request.retry_feedback:
+            current_request += (
+                f"\n法官已判定你上一次的回答无效：{request.retry_feedback}"
+            )
         return [
             {"role": "system", "content": system},
             {"role": "user", "content": history_message},
@@ -889,19 +1109,33 @@ class LLMController:
         try:
             data = json.loads(clean)
         except json.JSONDecodeError:
-            match = re.search(r"\{.*\}", clean, flags=re.DOTALL)
-            if not match:
+            data = LLMController._embedded_object(clean)
+            if data is None:
                 msg = f"LLM did not return JSON: {raw[:500]}"
                 raise RuntimeError(msg) from None
-            try:
-                data = json.loads(match.group(0))
-            except json.JSONDecodeError as exc:
-                msg = f"LLM returned invalid JSON: {raw[:500]}"
-                raise RuntimeError(msg) from exc
         if not isinstance(data, dict):
             msg = "LLM response must be a JSON object"
             raise TypeError(msg)
         return data
+
+    @staticmethod
+    def _embedded_object(clean: str) -> dict[str, Any] | None:
+        """Decode the first complete JSON object inside a chatty answer.
+
+        A greedy first-to-last brace match fails whenever a model adds a second
+        object or trailing prose, so each opening brace is tried in order.
+        """
+        decoder = json.JSONDecoder()
+        for index, character in enumerate(clean):
+            if character != "{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(clean, index)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+        return None
 
     @staticmethod
     def _optional_string(value: object) -> str | None:
@@ -991,9 +1225,7 @@ class BotController:
             ),
             0,
         )
-        if not seat:
-            return name
-        return f"Seat {seat} {name}" if view.language == "en" else f"{seat}号 {name}"
+        return seat_label(seat, name, view.language)
 
     @staticmethod
     def _thought(view: PlayerView, request: ActionRequest) -> str:

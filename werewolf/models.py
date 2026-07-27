@@ -119,6 +119,20 @@ def localized(mapping: dict[str, T], language: str) -> T:
     return mapping.get(language, mapping["zh-CN"])
 
 
+def seat_label(seat_number: int, name: str, language: str) -> str:
+    """Return the stable public label the judge and every controller share.
+
+    Players are addressed by seat throughout a match, so the judge, the local
+    bot, and each LLM prompt must render the same string. Names that look like
+    seat numbers otherwise cause an agent to introduce itself as another seat.
+    """
+    if not seat_number:
+        return name
+    return (
+        f"Seat {seat_number} {name}" if language == "en" else f"{seat_number}号 {name}"
+    )
+
+
 class Visibility(str, Enum):
     """Visibility labels attached to every memory event."""
 
@@ -214,6 +228,11 @@ class PlayerView:
     seat_players: tuple[tuple[str, int, str], ...] = ()
     mechanical_context: str = ""
 
+    @property
+    def own_label(self) -> str:
+        """Return how the judge names this player in every public record."""
+        return seat_label(self.seat_number, self.name, self.language)
+
 
 class ActionKind(str, Enum):
     """All actions a controller may be asked to perform."""
@@ -242,12 +261,23 @@ class ActionOption:
 
 @dataclass(frozen=True)
 class ActionRequest:
-    """A prompt plus the complete set of choices accepted by the judge."""
+    """A prompt plus the complete set of choices accepted by the judge.
+
+    ``requires_text`` marks actions whose whole purpose is a statement, so an
+    empty answer is a protocol failure rather than a decision. When
+    ``returns_private_result`` is set the judge will deliver a private result
+    produced by this very action, and a pass-and-play controller must keep the
+    terminal until it arrives. ``retry_feedback`` explains, in the player's own
+    language, why the judge rejected the previous answer to the same request.
+    """
 
     kind: ActionKind
     prompt: str
     options: tuple[ActionOption, ...] = ()
     allow_abstain: bool = False
+    requires_text: bool = False
+    returns_private_result: bool = False
+    retry_feedback: str = ""
 
 
 @dataclass(frozen=True)
