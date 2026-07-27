@@ -121,6 +121,57 @@ class BarrierVoteController:
         return AgentResponse(choice=request.options[0].value)
 
 
+class RecordingController:
+    """Answer from a queue while keeping every request the judge sent."""
+
+    def __init__(self, responses: list[AgentResponse]) -> None:
+        self.responses = list(responses)
+        self.requests = []
+
+    def act(self, _view, request):
+        """Return the next queued answer and record the request that asked for it."""
+        self.requests.append(request)
+        return self.responses.pop(0)
+
+
+class SeatController(RecordingController):
+    """Record judge results in the order a shared terminal would show them."""
+
+    def __init__(self, responses: list[AgentResponse]) -> None:
+        super().__init__(responses)
+        self.timeline: list[str] = []
+        self.results: list[str] = []
+
+    def act(self, view, request):
+        """Record the action before answering it."""
+        self.timeline.append(f"act:{request.kind.value}")
+        return super().act(view, request)
+
+    def receive_private_result(self, _view, text):
+        """Record a result the judge delivered inside this player's own turn."""
+        self.timeline.append("result")
+        self.results.append(text)
+
+
+def llm_seat_config(**overrides) -> GameConfig:
+    """Return the fixed table with every seat driven by a network controller."""
+    base = fixed_config()
+    return replace(
+        base,
+        players=tuple(
+            replace(player, controller="llm", provider="test")
+            for player in base.players
+        ),
+        providers={
+            "test": LLMProviderConfig(
+                base_url="https://example.invalid/v1",
+                model="test",
+            ),
+        },
+        **overrides,
+    )
+
+
 @pytest.mark.parametrize(
     ("count", "wolves", "hunters"),
     [(6, 2, 0), (8, 2, 1), (9, 3, 1), (12, 4, 1), (16, 5, 1)],
@@ -456,6 +507,151 @@ def test_controller_retries_stay_llm_only() -> None:
     assert game._by_id["p1"].memory.thoughts[-1].text == "保留私密判断"  # noqa: SLF001
 
 
+def test_seer_reads_the_inspection_result_inside_their_own_turn() -> None:
+    """The alignment must reach the Seer before the terminal moves on."""
+    roles = [
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        Role.SEER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+    ]
+    seer = SeatController([AgentResponse(choice="p1")])
+    game = Game(
+        fixed_role_config(roles),
+        controllers={"p3": seer},
+        terminal=SilentTerminal(),
+    )
+    game.day = 1
+    game.phase = "night"
+
+    game._seer_turn()  # noqa: SLF001
+
+    assert seer.timeline == ["act:seer_inspect", "result"]
+    assert seer.requests[0].returns_private_result is True
+    assert "1号 玩家1 属于【狼人侧】" in seer.results[0]
+    assert any(
+        "1号 玩家1 属于【狼人侧】" in event.text
+        for event in game._by_id["p3"].memory.events  # noqa: SLF001
+    )
+
+
+def test_replayed_inspection_rebuilds_memory_without_showing_it_again(
+    tmp_path,
+) -> None:
+    """A resume must restore the Seer's result without reprinting somebody's secret."""
+    roles = [
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        Role.SEER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+    ]
+    checkpoint = tmp_path / "private.checkpoint.json"
+    config = replace(fixed_role_config(roles), checkpoint_path=str(checkpoint))
+    game = Game(
+        config,
+        controllers={"p3": SeatController([AgentResponse(choice="p1")])},
+        terminal=SilentTerminal(),
+    )
+    game.day = 1
+    game.phase = "night"
+    game._save_checkpoint(next_day=1, next_step="night")  # noqa: SLF001
+    game._seer_turn()  # noqa: SLF001
+
+    replayed = SeatController([])
+    resumed = Game(
+        config,
+        controllers={"p3": replayed},
+        resume_checkpoint=checkpoint,
+        terminal=SilentTerminal(),
+    )
+    resumed.day = 1
+    resumed.phase = "night"
+
+    resumed._seer_turn()  # noqa: SLF001
+
+    assert replayed.timeline == []
+    assert any(
+        "1号 玩家1 属于【狼人侧】" in event.text
+        for event in resumed._by_id["p3"].memory.events  # noqa: SLF001
+    )
+
+
+def test_illegal_llm_choice_is_retried_with_a_judge_explanation() -> None:
+    """A rejected vote must tell the model what to fix instead of ending the game."""
+    controller = RecordingController(
+        [AgentResponse(choice="三号"), AgentResponse(choice="p3")],
+    )
+    game = Game(
+        llm_seat_config(controller_retries=1, strict_controllers=True),
+        controllers={"p1": controller},
+        terminal=SilentTerminal(),
+    )
+    game.phase = "vote"
+
+    response = game._act(  # noqa: SLF001
+        game._by_id["p1"],  # noqa: SLF001
+        ActionRequest(
+            ActionKind.VOTE,
+            "投票",
+            (ActionOption("p3", "3号 玩家3"),),
+            allow_abstain=True,
+        ),
+    )
+
+    assert response.choice == "p3"
+    assert controller.requests[0].retry_feedback == ""
+    assert "合法选项" in controller.requests[1].retry_feedback
+    assert game._controller_metrics.retries == 1  # noqa: SLF001
+
+
+def test_silent_model_statement_is_retried_but_people_may_still_pass() -> None:
+    """An empty model answer is a format failure; a human or bot may stay quiet."""
+    controller = RecordingController(
+        [AgentResponse(text=""), AgentResponse(text="我来发言")],
+    )
+    speak = ActionRequest(ActionKind.SPEAK, "发言", requires_text=True)
+    game = Game(
+        llm_seat_config(controller_retries=1, strict_controllers=True),
+        controllers={"p1": controller},
+        terminal=SilentTerminal(),
+    )
+    game.phase = "discussion"
+
+    response = game._act(game._by_id["p1"], speak)  # noqa: SLF001
+
+    assert response.text == "我来发言"
+    assert "text" in controller.requests[1].retry_feedback
+
+    local = Game(
+        fixed_config(),
+        controllers={"p1": ScriptedController()},
+        terminal=SilentTerminal(),
+    )
+    local.phase = "discussion"
+
+    assert local._act(local._by_id["p1"], speak).text == ""  # noqa: SLF001
+
+
+def test_strict_mode_reports_a_silent_model_without_naming_the_action() -> None:
+    """An exhausted retry budget must still name the cause for the operator."""
+    game = Game(
+        llm_seat_config(controller_retries=0, strict_controllers=True),
+        controllers={"p1": RecordingController([AgentResponse(text="")])},
+        terminal=SilentTerminal(),
+    )
+    game.phase = "discussion"
+
+    with pytest.raises(RuntimeError, match="empty text for speak"):
+        game._act(  # noqa: SLF001
+            game._by_id["p1"],  # noqa: SLF001
+            ActionRequest(ActionKind.SPEAK, "发言", requires_text=True),
+        )
+
+
 def test_non_strict_failure_uses_visible_safe_fallback_and_metrics() -> None:
     """Casual fallback should abstain, report degradation, and remain auditable."""
     provider = LLMProviderConfig(base_url="https://example.invalid/v1", model="test")
@@ -631,6 +827,7 @@ def test_generated_config_uses_recommended_defaults_without_listing_them(
     assert config.public_transcript_path == "game_runs/public.log"
     assert config.parallel_llm_votes is True
     assert config.human_strategy_notes is False
+    assert config.providers["default"].stream is True
     assert config.players[1].provider == "default"
 
 
@@ -643,6 +840,7 @@ def test_full_example_config_remains_available_for_advanced_options() -> None:
     assert config["roles"] is None
     assert config["rules"]["randomize_seating"] is True
     assert config["providers"]["default"]["max_tokens"] == 2000
+    assert config["providers"]["default"]["stream"] is True
 
 
 def test_custom_role_counts_and_partial_fixed_roles_are_supported(

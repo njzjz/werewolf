@@ -21,6 +21,7 @@ from .agents import (
     HumanController,
     LLMController,
     OpenAICompatibleClient,
+    PrivateResultReceiver,
     SafeFallbackController,
     Terminal,
 )
@@ -41,6 +42,7 @@ from .models import (
     Thought,
     Visibility,
     localized,
+    seat_label,
 )
 from .skills import (
     add_lover_skill,
@@ -50,7 +52,7 @@ from .skills import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from .config import GameConfig, PlayerConfig
 
@@ -1040,26 +1042,28 @@ class Game:
                 self._t("选择今晚要查验的玩家。", "Choose one player to inspect."),
                 self._options(candidates),
             ),
+            private_result=self._inspection_result,
         )
         if response.choice:
             target = self._by_id[response.choice]
-            faction = (
-                self._t("狼人侧", "werewolf-side")
-                if target.role.appears_werewolf
-                else self._t("村人侧", "village-side")
-            )
-            self.boundary.private(
-                day=self.day,
-                phase=self.phase,
-                recipient=seer.player_id,
-                text=self._t(
-                    f"查验结果：{self._player_label(target)} 属于【{faction}】。",
-                    f"Inspection: {self._player_label(target)} belongs to the {faction}.",
-                ),
-            )
             if target.role is Role.FOX:
                 return target.player_id
         return None
+
+    def _inspection_result(self, response: AgentResponse) -> str:
+        """Render the alignment the Seer earned with this night's inspection."""
+        if not response.choice:
+            return ""
+        target = self._by_id[response.choice]
+        faction = (
+            self._t("狼人侧", "werewolf-side")
+            if target.role.appears_werewolf
+            else self._t("村人侧", "village-side")
+        )
+        return self._t(
+            f"查验结果：{self._player_label(target)} 属于【{faction}】。",
+            f"Inspection: {self._player_label(target)} belongs to the {faction}.",
+        )
 
     def _witch_turn(self, victim: str | None) -> tuple[bool, str | None]:
         witch = next(
@@ -1152,6 +1156,7 @@ class Game:
                 ActionRequest(
                     ActionKind.SPEAK,
                     self._t("请发表本轮公开发言。", "Give your public statement."),
+                    requires_text=True,
                 ),
             )
             speech = response.text.strip() or self._t(
@@ -1190,6 +1195,7 @@ class Game:
                             "你进入平票，请发表辩解。",
                             "You are tied; give a defense.",
                         ),
+                        requires_text=True,
                     ),
                 )
                 self._say(
@@ -1327,6 +1333,7 @@ class Game:
                             "你已死亡，请留下公开遗言。",
                             "You have died. Give public final words.",
                         ),
+                        requires_text=True,
                     ),
                 )
                 if response.text.strip():
@@ -1402,7 +1409,22 @@ class Game:
             )
         return False
 
-    def _act(self, player: PlayerState, request: ActionRequest) -> AgentResponse:
+    def _act(
+        self,
+        player: PlayerState,
+        request: ActionRequest,
+        *,
+        private_result: Callable[[AgentResponse], str] | None = None,
+    ) -> AgentResponse:
+        """Run one controller action and deliver the result it produces.
+
+        ``private_result`` renders the secret this very action creates, such as
+        an inspection. Passing it here rather than resolving it at the call
+        site keeps the result inside the acting player's turn, which is what a
+        shared pass-and-play terminal requires.
+        """
+        if private_result is not None:
+            request = replace(request, returns_private_result=True)
         replayed = self._replay_action(player, request)
         if replayed is not None:
             response = replayed
@@ -1410,6 +1432,13 @@ class Game:
                 part for part in (response.thought, response.note) if part.strip()
             )
             player.memory.reflect(self.day, self.phase, private_note)
+            if private_result is not None:
+                # The original player already read this during the lost run.
+                self._deliver_private_result(
+                    player,
+                    private_result(response),
+                    display=False,
+                )
             return response
         heartbeat_stop = threading.Event()
         heartbeat: threading.Thread | None = None
@@ -1435,7 +1464,27 @@ class Game:
             part for part in (response.thought, response.note) if part.strip()
         )
         player.memory.reflect(self.day, self.phase, private_note)
+        if private_result is not None:
+            self._deliver_private_result(player, private_result(response))
         return response
+
+    def _deliver_private_result(
+        self,
+        player: PlayerState,
+        text: str,
+        *,
+        display: bool = True,
+    ) -> None:
+        """Record a secret created by this player's action and show it to them."""
+        if text:
+            self.boundary.private(
+                day=self.day,
+                phase=self.phase,
+                recipient=player.player_id,
+                text=text,
+            )
+        if display and isinstance(player.controller, PrivateResultReceiver):
+            player.controller.receive_private_result(self._view(player), text)
 
     def _act_independent(
         self,
@@ -1612,20 +1661,26 @@ class Game:
         player: PlayerState,
         request: ActionRequest,
     ) -> AgentResponse:
-        """Call one controller with bounded retries and validated choices."""
+        """Call one controller with bounded retries and validated responses."""
         is_llm = self._controller_kinds.get(player.player_id) == "llm"
         if is_llm:
             self._increment_metric("actions")
         last_error = ""
+        feedback = ""
         for attempt in range(self.config.controller_retries + 1):
             if is_llm:
                 self._increment_metric("attempts")
+            attempt_request = (
+                replace(request, retry_feedback=feedback) if feedback else request
+            )
             try:
-                response = player.controller.act(self._view(player), request)
+                response = player.controller.act(self._view(player), attempt_request)
             except (EOFError, KeyboardInterrupt):
                 raise
             except Exception as exc:
                 last_error = self._short_error(f"{type(exc).__name__}: {exc}")
+                # A transport failure gives the model nothing to correct.
+                feedback = ""
                 if is_llm:
                     self._increment_metric("failures")
                 if attempt < self.config.controller_retries:
@@ -1640,29 +1695,20 @@ class Game:
                         last_error,
                     )
                     raise RuntimeError(msg) from exc
-                with self._state_lock:
-                    self.boundary.private(
-                        day=self.day,
-                        phase=self.phase,
-                        recipient=player.player_id,
-                        text=self._t(
-                            f"控制器调用失败，法官启用系统安全后备：{last_error}",
-                            f"Controller failed; judge used the system safe fallback: {last_error}",
-                        ),
-                    )
+                self._record_private_fallback_note(
+                    player,
+                    self._t(
+                        f"控制器调用失败，法官启用系统安全后备：{last_error}",
+                        f"Controller failed; judge used the system safe fallback: {last_error}",
+                    ),
+                )
                 return self._safe_fallback(player, request, last_error, attempt + 1)
 
-            legal = {option.value for option in request.options}
-            illegal = bool(
-                request.options
-                and response.choice not in legal
-                and (response.choice is not None or not request.allow_abstain)
-            )
-            if not illegal:
+            reason = self._rejection_reason(request, response, is_llm=is_llm)
+            if not reason:
                 return replace(response, attempts=attempt + 1)
-            last_error = self._short_error(
-                f"Illegal choice for {request.kind.value}: {response.choice!r}",
-            )
+            last_error = self._short_error(reason)
+            feedback = self._retry_feedback(request, reason)
             if is_llm:
                 self._increment_metric("failures")
             if attempt < self.config.controller_retries:
@@ -1671,25 +1717,79 @@ class Game:
                 self._announce_controller_retry(attempt + 1)
                 continue
             if self.config.strict_controllers:
-                msg = self._strict_controller_error(
-                    player,
-                    request,
-                    f"illegal choice {response.choice!r}",
-                )
+                msg = self._strict_controller_error(player, request, last_error)
                 raise RuntimeError(msg)
-            with self._state_lock:
-                self.boundary.private(
-                    day=self.day,
-                    phase=self.phase,
-                    recipient=player.player_id,
-                    text=self._t(
-                        "提交了非法选项，法官改用系统安全后备。",
-                        "Illegal option; judge selected the system safe fallback.",
-                    ),
-                )
+            self._record_private_fallback_note(
+                player,
+                self._t(
+                    f"回答无效（{last_error}），法官改用系统安全后备。",
+                    f"Invalid response ({last_error}); judge selected the system safe fallback.",
+                ),
+            )
             return self._safe_fallback(player, request, last_error, attempt + 1)
         msg = "Controller retry loop ended without a response"
         raise RuntimeError(msg)
+
+    def _rejection_reason(
+        self,
+        request: ActionRequest,
+        response: AgentResponse,
+        *,
+        is_llm: bool,
+    ) -> str:
+        """Return why an answer cannot be applied, or an empty string.
+
+        Option legality is judged for every controller. An empty statement is
+        only rejected for network controllers, where silence is a response
+        format failure rather than a decision a person or local bot made.
+        """
+        legal = {option.value for option in request.options}
+        if (
+            request.options
+            and response.choice not in legal
+            and (response.choice is not None or not request.allow_abstain)
+        ):
+            return f"illegal choice {response.choice!r} for {request.kind.value}"
+        if is_llm and request.requires_text and not response.text.strip():
+            return f"empty text for {request.kind.value}"
+        return ""
+
+    def _retry_feedback(self, request: ActionRequest, reason: str) -> str:
+        """Explain a rejected answer to the controller in the game language."""
+        if reason.startswith("empty text"):
+            return self._t(
+                "上一次回答的 text 是空的；本轮必须给出非空的公开发言内容。",
+                "Your previous answer left text empty; this action requires a "
+                "non-empty statement.",
+            )
+        abstain_rule = (
+            self._t(
+                "确实要弃权时才把 choice 设为 null。",
+                "Only set choice to null when you really abstain.",
+            )
+            if request.allow_abstain
+            else self._t(
+                "本动作不允许弃权，choice 不能为 null。",
+                "This action cannot abstain, so choice must not be null.",
+            )
+        )
+        return self._t(
+            f"上一次回答的 choice 不在合法选项内（{reason}）；"
+            f"请从合法选项的 value 中原样复制一个，不要填座位号或姓名。{abstain_rule}",
+            f"Your previous choice was not a legal option ({reason}). Copy one "
+            f"value from the legal options verbatim instead of a seat number or "
+            f"name. {abstain_rule}",
+        )
+
+    def _record_private_fallback_note(self, player: PlayerState, text: str) -> None:
+        """Tell one player why the judge replaced their action, and nobody else."""
+        with self._state_lock:
+            self.boundary.private(
+                day=self.day,
+                phase=self.phase,
+                recipient=player.player_id,
+                text=text,
+            )
 
     def _strict_controller_error(
         self,
@@ -1706,7 +1806,7 @@ class Game:
             )
         category = (
             "invalid response"
-            if detail.lower().startswith("illegal choice")
+            if detail.lower().startswith(("illegal choice", "empty text"))
             else detail.split(":", maxsplit=1)[0]
         )
         return f"Controller failed during a private action ({category}); private details were not printed."
@@ -2195,9 +2295,7 @@ class Game:
 
     def _player_label(self, player: PlayerState) -> str:
         """Return a localized stable seat label without mutating configured names."""
-        if self.config.language == "en":
-            return f"Seat {player.seat_number} {player.name}"
-        return f"{player.seat_number}号 {player.name}"
+        return seat_label(player.seat_number, player.name, self.config.language)
 
     def _plurality(self, votes: list[str]) -> str | None:
         if not votes:
