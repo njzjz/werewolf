@@ -961,14 +961,15 @@ class LLMController:
         if raw in legal:
             return raw
         keys = cls._answer_keys(raw)
+        normalized = raw.casefold()
         matched = {
             option.value
             for option in request.options
-            if keys & cls._option_aliases(option) or option.value in raw
+            if keys & cls._option_aliases(option)
+            or cls._quotes_value(normalized, option.value)
         }
         if len(matched) == 1:
             return matched.pop()
-        normalized = raw.casefold()
         if request.allow_abstain and (
             normalized in ABSTAIN_ANSWERS or normalized.startswith(ABSTAIN_PREFIXES)
         ):
@@ -976,6 +977,24 @@ class LLMController:
         if len(request.options) == 1 and normalized in AFFIRMATIVE_ANSWERS:
             return request.options[0].value
         return raw
+
+    @staticmethod
+    def _quotes_value(normalized: str, value: str) -> bool:
+        """Return whether an answer names one option value as a whole token.
+
+        Option values are ASCII identifiers such as ``p1``, so an adjacent
+        letter or digit means the answer named a different seat: ``p10`` must
+        never resolve to ``p1``. Surrounding Chinese text is a boundary.
+        """
+
+        def separates(character: str) -> bool:
+            return not character or not (character.isascii() and character.isalnum())
+
+        return any(
+            separates(normalized[match.start() - 1] if match.start() else "")
+            and separates(normalized[match.end() : match.end() + 1])
+            for match in re.finditer(re.escape(value.casefold()), normalized)
+        )
 
     @staticmethod
     def _answer_keys(raw: str) -> set[str]:

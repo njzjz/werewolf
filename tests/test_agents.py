@@ -424,6 +424,25 @@ def test_llm_choice_accepts_seat_number_label_and_name() -> None:
     assert resolve("p9", request) == "p9"
 
 
+def test_llm_choice_keeps_double_digit_seats_apart() -> None:
+    """A ten-plus seat table must not read ``p10`` as the option ``p1``."""
+    request = ActionRequest(
+        ActionKind.VOTE,
+        "请投票",
+        tuple(
+            ActionOption(f"p{seat}", f"{seat}号 智能体{seat}") for seat in range(1, 13)
+        ),
+        allow_abstain=True,
+    )
+
+    resolve = LLMController._resolve_choice  # noqa: SLF001
+
+    assert resolve("我投 p10", request) == "p10"
+    assert resolve("10号", request) == "p10"
+    assert resolve("vote for p1", request) == "p1"
+    assert resolve("p1 和 p2 都可疑", request) == "p1 和 p2 都可疑"
+
+
 def test_llm_only_abstains_where_the_judge_allows_it() -> None:
     """Refusal wording resolves to abstain, but never for a mandatory ability."""
     optional = ActionRequest(
