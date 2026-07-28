@@ -737,11 +737,9 @@ class OpenAICompatibleClient:
         """
         for details_key in ("prompt_tokens_details", "input_tokens_details"):
             details = usage.get(details_key)
-            if isinstance(details, dict) and isinstance(
-                details.get("cached_tokens"),
-                int,
-            ):
-                return details["cached_tokens"]
+            cached = details.get("cached_tokens") if isinstance(details, dict) else None
+            if isinstance(cached, int) and not isinstance(cached, bool):
+                return cached
         for usage_key in (
             "prompt_cache_hit_tokens",
             "cache_read_input_tokens",
