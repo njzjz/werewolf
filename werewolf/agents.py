@@ -596,6 +596,7 @@ class OpenAICompatibleClient:
     observed_cached_tokens: int = field(default=0, init=False)
     observed_output_tokens: int = field(default=0, init=False)
     observed_usage_responses: int = field(default=0, init=False)
+    observed_cache_reports: int = field(default=0, init=False)
 
     def complete(self, messages: list[dict[str, str]]) -> str:
         """Return assistant content from an OpenAI-compatible response."""
@@ -714,10 +715,40 @@ class OpenAICompatibleClient:
 
     @property
     def observed_cache_hit_rate(self) -> float | None:
-        """Return the provider-reported cached share of observed input tokens."""
-        if self.observed_input_tokens <= 0:
+        """Return the provider-reported cached share of observed input tokens.
+
+        ``None`` means the cached share is unknown: either no usage was seen at
+        all, or every response omitted the cache fields. A provider that never
+        reports them is not the same as a provider that reports zero hits, so
+        the caller must not print an unmeasured 0%.
+        """
+        if self.observed_input_tokens <= 0 or self.observed_cache_reports <= 0:
             return None
         return self.observed_cached_tokens / self.observed_input_tokens
+
+    @staticmethod
+    def _cached_tokens(usage: dict[str, Any]) -> int | None:
+        """Read cached input tokens from the shapes compatible APIs report.
+
+        OpenAI, vLLM, and DashScope nest ``cached_tokens`` under a token-details
+        object; DeepSeek reports ``prompt_cache_hit_tokens`` at the usage root;
+        Anthropic-compatible gateways report ``cache_read_input_tokens``. A
+        provider that reports none of them leaves the cached share unknown.
+        """
+        for details_key in ("prompt_tokens_details", "input_tokens_details"):
+            details = usage.get(details_key)
+            cached = details.get("cached_tokens") if isinstance(details, dict) else None
+            if isinstance(cached, int) and not isinstance(cached, bool):
+                return cached
+        for usage_key in (
+            "prompt_cache_hit_tokens",
+            "cache_read_input_tokens",
+            "cached_tokens",
+        ):
+            value = usage.get(usage_key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+        return None
 
     def _record_usage(self, response: dict[str, Any]) -> bool:
         """Accumulate Responses and Chat token usage without logging prompts."""
@@ -726,21 +757,13 @@ class OpenAICompatibleClient:
             return False
         input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
         output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
-        input_details = usage.get(
-            "input_tokens_details",
-            usage.get("prompt_tokens_details", {}),
-        )
-        cached_tokens = (
-            input_details.get("cached_tokens", 0)
-            if isinstance(input_details, dict)
-            else 0
-        )
+        cached_tokens = self._cached_tokens(usage)
         if not isinstance(input_tokens, int):
             return False
         self.observed_input_tokens += input_tokens
-        self.observed_cached_tokens += (
-            cached_tokens if isinstance(cached_tokens, int) else 0
-        )
+        if cached_tokens is not None:
+            self.observed_cached_tokens += cached_tokens
+            self.observed_cache_reports += 1
         self.observed_output_tokens += (
             output_tokens if isinstance(output_tokens, int) else 0
         )

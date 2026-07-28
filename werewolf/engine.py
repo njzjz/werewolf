@@ -2234,15 +2234,37 @@ class Game:
         cached_tokens = sum(client.observed_cached_tokens for client in clients)
         output_tokens = sum(client.observed_output_tokens for client in clients)
         usage_responses = sum(client.observed_usage_responses for client in clients)
+        cache_reports = sum(client.observed_cache_reports for client in clients)
         if input_tokens <= 0:
             return ""
-        cache_rate = cached_tokens / input_tokens
+        if cache_reports <= 0:
+            # Reporting 0% here would blame prefix caching for a provider that
+            # simply omits the cache fields, so say the share is unknown.
+            cache_text = self._t(
+                "缓存命中 未知（provider 的 usage 未返回缓存字段）",
+                "cached unknown (provider usage omits cache fields)",
+            )
+        else:
+            cache_rate = cached_tokens / input_tokens
+            partial = (
+                self._t(
+                    f"，其中 {cache_reports}/{usage_responses} 次响应带缓存字段",
+                    f", from {cache_reports}/{usage_responses} responses "
+                    "reporting cache fields",
+                )
+                if cache_reports < usage_responses
+                else ""
+            )
+            cache_text = self._t(
+                f"缓存命中 {cached_tokens}（{cache_rate:.1%}）{partial}",
+                f"{cached_tokens} cached ({cache_rate:.1%}){partial}",
+            )
         return self._t(
             "本进程已观测到的 LLM token："
-            f"输入 {input_tokens}，缓存命中 {cached_tokens}（{cache_rate:.1%}），"
+            f"输入 {input_tokens}，{cache_text}，"
             f"输出 {output_tokens}；provider 返回 usage 的响应共 {usage_responses} 次。",
             "LLM tokens observed in this process: "
-            f"{input_tokens} input, {cached_tokens} cached ({cache_rate:.1%}), "
+            f"{input_tokens} input, {cache_text}, "
             f"{output_tokens} output across {usage_responses} responses with usage.",
         )
 
