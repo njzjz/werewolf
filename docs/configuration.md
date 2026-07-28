@@ -153,6 +153,8 @@ Responses provider 可选：
 
 部分代理会拒绝这些新字段，因此默认关闭。即使 `prompt_cache` 为 `false`，上游若支持自动前缀缓存，稳定前缀设计仍然有效。游戏结束时，如果 provider 返回 `usage`，终端会汇总输入、缓存命中和输出 token；token 统计只覆盖当前进程，游戏时长和控制器可靠性统计会随恢复点延续。
 
+缓存命中的读取兼容三种常见写法：`prompt_tokens_details.cached_tokens` 或 `input_tokens_details.cached_tokens`（OpenAI、vLLM、DashScope）、`prompt_cache_hit_tokens`（DeepSeek 官方 API）、`cache_read_input_tokens`（Anthropic 兼容网关）。如果 provider 的 `usage` 里一个都没有，终端会显示“缓存命中 未知”，而不是 0%——这类网关只是没有上报缓存字段，未必真的没有命中缓存。
+
 参考：[OpenAI Prompt Caching](https://developers.openai.com/api/docs/guides/prompt-caching)。
 
 ## 观战、严格模式与恢复

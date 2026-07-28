@@ -244,6 +244,63 @@ def test_responses_prompt_cache_uses_stable_private_key_and_tracks_usage() -> No
     assert client.observed_cache_hit_rate == 0.64
 
 
+def test_usage_reads_vendor_specific_cache_fields() -> None:
+    """DeepSeek and Anthropic-compatible gateways name their cache field differently."""
+    usages = [
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 10,
+            "prompt_cache_hit_tokens": 640,
+            "prompt_cache_miss_tokens": 360,
+        },
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 10,
+            "cache_read_input_tokens": 360,
+        },
+    ]
+
+    def transport(_: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "choices": [{"message": {"content": '{"text":"收到"}'}}],
+            "usage": usages.pop(0),
+        }
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="deepseek-chat"),
+        transport=transport,
+    )
+
+    client.complete([{"role": "user", "content": "一"}])
+    client.complete([{"role": "user", "content": "二"}])
+
+    assert client.observed_input_tokens == 2000
+    assert client.observed_cached_tokens == 1000
+    assert client.observed_cache_reports == 2
+    assert client.observed_cache_hit_rate == 0.5
+
+
+def test_cache_hit_rate_is_unknown_when_usage_omits_cache_fields() -> None:
+    """Gateways that trim usage leave the cached share unmeasured, not zero."""
+
+    def transport(_: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "choices": [{"message": {"content": '{"text":"收到"}'}}],
+            "usage": {"prompt_tokens": 5825, "completion_tokens": 16},
+        }
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+        transport=transport,
+    )
+
+    client.complete([{"role": "user", "content": "一"}])
+
+    assert client.observed_input_tokens == 5825
+    assert client.observed_cache_reports == 0
+    assert client.observed_cache_hit_rate is None
+
+
 def test_llm_places_append_only_history_before_dynamic_action() -> None:
     """Changing the current action must not invalidate the cached history prefix."""
     client = OpenAICompatibleClient(
