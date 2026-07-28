@@ -233,6 +233,10 @@ class Game:
         self._antidote_available = True
         self._poison_available = True
         self._last_exiled_id: str | None = None
+        # Anchor for the next day's public discussion: the seat clockwise after
+        # the most recent deceased player. ``None`` until somebody has died,
+        # which makes the first discussion (peaceful opening night) random.
+        self._last_death_id: str | None = None
 
         seats = self._ordered_seats(resume_checkpoint)
         self._seat_configs = tuple(seats)
@@ -315,6 +319,7 @@ class Game:
             "antidote_available": self._antidote_available,
             "poison_available": self._poison_available,
             "last_exiled_id": self._last_exiled_id,
+            "last_death_id": self._last_death_id,
             "elapsed_seconds": time.monotonic() - self._started_at,
             "controller_metrics": asdict(self._controller_metrics),
             "fallback_records": [asdict(item) for item in self._fallback_records],
@@ -442,6 +447,11 @@ class Game:
         self._antidote_available = bool(raw["antidote_available"])
         self._poison_available = bool(raw["poison_available"])
         self._last_exiled_id = raw.get("last_exiled_id")
+        # Version-1 checkpoints written before death-anchored discussion order
+        # do not contain this field. Defaulting to ``None`` only affects the
+        # opening discussion of a resumed game, which then uses the seeded
+        # random start as it did before.
+        self._last_death_id = raw.get("last_death_id")
         self._started_at = time.monotonic() - float(raw.get("elapsed_seconds", 0.0))
         metrics = raw.get("controller_metrics", {})
         if not isinstance(metrics, dict):
@@ -1137,19 +1147,23 @@ class Game:
         start_name = (
             self._player_label(speakers[0]) if speakers else self._t("无人", "nobody")
         )
-        self._announce(
-            (
-                self._t(
-                    f"第 {self.day} 天，开始公开讨论。本日随机从 {start_name} 起按座位顺序发言。",
-                    f"Day {self.day}. Public discussion randomly begins with {start_name} and proceeds in seat order.",
-                )
-                if self.config.rules.randomize_discussion_start
-                else self._t(
-                    f"第 {self.day} 天，开始公开讨论。本日从 {start_name} 起按固定座位顺序发言。",
-                    f"Day {self.day}. Public discussion begins with {start_name} in fixed seat order.",
-                )
-            ),
-        )
+        if not self.config.rules.randomize_discussion_start:
+            announcement = self._t(
+                f"第 {self.day} 天，开始公开讨论。本日从 {start_name} 起按固定座位顺序发言。",
+                f"Day {self.day}. Public discussion begins with {start_name} in fixed seat order.",
+            )
+        elif self._last_death_id is not None:
+            dead_name = self._player_label(self._by_id[self._last_death_id])
+            announcement = self._t(
+                f"第 {self.day} 天，开始公开讨论。从死亡玩家 {dead_name} 的下家 {start_name} 起按座位顺序发言。",
+                f"Day {self.day}. Public discussion begins with {start_name}, the seat after the deceased {dead_name}, and proceeds in seat order.",
+            )
+        else:
+            announcement = self._t(
+                f"第 {self.day} 天，开始公开讨论。本日随机从 {start_name} 起按座位顺序发言。",
+                f"Day {self.day}. Public discussion randomly begins with {start_name} and proceeds in seat order.",
+            )
+        self._announce(announcement)
         for player in speakers:
             response = self._act(
                 player,
@@ -1227,12 +1241,38 @@ class Game:
         )
 
     def _discussion_order(self) -> list[PlayerState]:
-        """Rotate living seats using randomness isolated from private actions."""
+        """Rotate living seats clockwise after the most recent deceased player.
+
+        The standard ``死左`` rule starts the day's discussion with the first
+        living seat clockwise of the player who died most recently, so a night
+        kill determines the next morning's speaker and a peaceful night reuses
+        the previous exile. Only the opening discussion, before anybody has
+        died, falls back to a seeded random seat. Randomness is isolated from
+        private night actions so a secret branch cannot shift the public order.
+        """
         alive = list(self._alive())
         if len(alive) < 2 or not self.config.rules.randomize_discussion_start:
             return alive
-        start = self._discussion_rng.randrange(len(alive))
+        anchor = self._last_death_id
+        if anchor is not None:
+            start = self._seat_after(alive, anchor)
+        else:
+            start = self._discussion_rng.randrange(len(alive))
         return [*alive[start:], *alive[:start]]
+
+    def _seat_after(self, alive: list[PlayerState], dead_id: str) -> int:
+        """Return the index in ``alive`` of the first seat clockwise of ``dead_id``.
+
+        ``alive`` is kept in ascending seat-number order, so the next living
+        seat is the first one whose seat number exceeds the deceased player's.
+        When the deceased held the highest living seat, the circle wraps to the
+        first living seat.
+        """
+        dead_seat = self._by_id[dead_id].seat_number
+        for index, player in enumerate(alive):
+            if player.seat_number > dead_seat:
+                return index
+        return 0
 
     def _collect_votes(
         self,
@@ -1306,6 +1346,11 @@ class Game:
                 newly_dead.append((player, causes))
         if not newly_dead:
             return
+        # The primary death (first in insertion order: the wolf victim at
+        # night, the vote target by day) anchors the next public discussion.
+        # Chain reactions such as heartbreak and Hunter shots follow it but do
+        # not override the anchor.
+        self._last_death_id = newly_dead[0][0].player_id
         self._announce(self._with_role_reveal(announcement, newly_dead))
         queue = list(newly_dead)
         while queue:
