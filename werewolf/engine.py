@@ -1346,8 +1346,11 @@ class Game:
                 newly_dead.append((player, causes))
         if not newly_dead:
             return
-        # The primary death (first in insertion order: the wolf victim at
-        # night, the vote target by day) anchors the next public discussion.
+        # The primary death is the first newly-dead entry in ``deaths``
+        # insertion order: at night the night call site lists the wolf victim
+        # before any divination/poison deaths (so the anchor may be a poison or
+        # divination victim on a night without a wolf kill), and by day only
+        # the vote target is passed. This anchor drives the next discussion.
         # Chain reactions such as heartbreak and Hunter shots follow it but do
         # not override the anchor.
         self._last_death_id = newly_dead[0][0].player_id
