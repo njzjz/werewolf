@@ -358,6 +358,61 @@ def test_discussion_start_randomization_can_be_disabled() -> None:
     ] == ["p1", "p2", "p3", "p4", "p5", "p6"]
 
 
+def test_night_death_anchors_the_next_discussion_start() -> None:
+    """Discussion should begin with the seat clockwise of the night's victim."""
+    config = replace(
+        fixed_config(),
+        rules=replace(fixed_config().rules, last_words=False),
+    )
+    game = Game(config, terminal=SilentTerminal())
+    game.day = 1
+    game.phase = "night"
+    game._apply_deaths(  # noqa: SLF001
+        {"p3": {DeathCause.WOLF}},
+        "天亮了，昨夜死亡：3号。",
+    )
+
+    assert game._last_death_id == "p3"  # noqa: SLF001
+    assert [player.player_id for player in game._discussion_order()] == [  # noqa: SLF001
+        "p4",
+        "p5",
+        "p6",
+        "p1",
+        "p2",
+    ]
+
+
+def test_discussion_wraps_around_when_the_last_seat_dies() -> None:
+    """The seat after the highest living seat wraps to the first living seat."""
+    game = Game(fixed_config(), terminal=SilentTerminal())
+    game._by_id["p6"].alive = False  # noqa: SLF001
+    game._last_death_id = "p6"  # noqa: SLF001
+
+    assert [player.player_id for player in game._discussion_order()] == [  # noqa: SLF001
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "p5",
+    ]
+
+
+def test_peaceful_night_reuses_the_most_recent_death_as_anchor() -> None:
+    """A peaceful night should fall back to the previous exile's seat."""
+    game = Game(fixed_config(), terminal=SilentTerminal())
+    # Simulate a prior day-vote exile with no new night death.
+    game._by_id["p5"].alive = False  # noqa: SLF001
+    game._last_death_id = "p5"  # noqa: SLF001
+
+    assert [player.player_id for player in game._discussion_order()] == [  # noqa: SLF001
+        "p6",
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+    ]
+
+
 def test_setup_keeps_roles_private_and_wolf_roster_team_only() -> None:
     """Setup secrets are delivered to the owning player or the wolf team."""
     game = Game(fixed_config(), terminal=SilentTerminal())
