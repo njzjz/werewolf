@@ -963,6 +963,63 @@ def test_parallel_vote_failure_does_not_wait_for_another_stalled_future() -> Non
         release.set()
 
 
+def test_mixed_vote_batch_persists_later_human_before_earlier_llm_failure(
+    tmp_path,
+) -> None:
+    """Resume must not ask a human to repeat a vote already submitted privately."""
+    checkpoint = tmp_path / "private.checkpoint.json"
+    provider = LLMProviderConfig(base_url="https://example.invalid/v1", model="test")
+    base = fixed_config()
+    players = list(base.players)
+    players[0] = replace(players[0], controller="llm", provider="test")
+    players[1] = replace(players[1], controller="human")
+    config = replace(
+        base,
+        players=tuple(players),
+        providers={"test": provider},
+        checkpoint_path=str(checkpoint),
+        parallel_llm_votes=True,
+        strict_controllers=True,
+    )
+    human = ScriptedController(
+        {ActionKind.VOTE: [AgentResponse(choice="p3")]},
+    )
+    game = Game(
+        config,
+        controllers={"p1": FailingController(), "p2": human},
+        terminal=SilentTerminal(),
+    )
+    game.day = 1
+    game.phase = "vote"
+    game._save_checkpoint(next_day=1, next_step="daytime")  # noqa: SLF001
+
+    with pytest.raises(RuntimeError):
+        game._collect_votes(None)  # noqa: SLF001
+
+    journal = json.loads(checkpoint.read_text(encoding="utf-8"))["action_journal"]
+    assert {entry["action_index"] for entry in journal} == {1, 2, 3, 4, 5}
+    assert len(human.requests) == 1
+
+    resumed = Game(
+        config,
+        controllers={
+            "p1": ScriptedController(
+                {ActionKind.VOTE: [AgentResponse(choice="p2")]},
+            ),
+            "p2": FailingController(),
+        },
+        terminal=SilentTerminal(),
+        resume_checkpoint=checkpoint,
+    )
+    resumed.day = 1
+    resumed.phase = "vote"
+
+    votes = resumed._collect_votes(None)  # noqa: SLF001
+
+    assert votes["p1"] == "p2"
+    assert votes["p2"] == "p3"
+
+
 def test_parallel_votes_remain_replayable_from_checkpoint(tmp_path) -> None:
     """Concurrent requests must still journal responses in deterministic seat order."""
     provider = LLMProviderConfig(base_url="https://example.invalid/v1", model="test")

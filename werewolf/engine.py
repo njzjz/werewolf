@@ -10,7 +10,7 @@ import tempfile
 import threading
 import time
 from collections import Counter
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
@@ -1536,6 +1536,7 @@ class Game:
         """
         if private_result is not None:
             request = replace(request, returns_private_result=True)
+        action_index = self._action_cursor
         replayed = self._replay_action(
             player,
             request,
@@ -1564,9 +1565,11 @@ class Game:
                 player,
                 request,
                 response,
+                action_index=action_index,
                 private_result_text=private_result_text,
             )
             self._apply_action_side_effects(player, entry)
+            self._action_cursor = action_index + 1
         finally:
             heartbeat_stop.set()
             if heartbeat is not None:
@@ -1596,28 +1599,41 @@ class Game:
         self,
         actions: list[tuple[PlayerState, ActionRequest]],
     ) -> list[AgentResponse]:
-        """Run mutually invisible LLM choices concurrently and journal in seat order.
+        """Run mutually invisible choices and persist each completed response.
 
         Public votes are revealed only after every choice is collected, so LLM
         voters cannot observe one another and may safely run in parallel. Human
         and local-bot inputs are collected before network work begins to avoid
-        progress output interrupting an interactive prompt.
+        progress output interrupting an interactive prompt. Journal entries use
+        logical action indexes, allowing a later seat to be durable even when
+        an earlier network request fails.
         """
         if not self.config.parallel_llm_votes:
             return [self._act(player, request) for player, request in actions]
 
+        batch_start = self._action_cursor
         responses: list[AgentResponse | None] = [None] * len(actions)
-        replayed: set[int] = set()
         pending: list[int] = []
         for index, (player, request) in enumerate(actions):
-            response = self._replay_action(player, request)
+            response = self._replay_action(
+                player,
+                request,
+                action_index=batch_start + index,
+            )
             if response is not None:
                 responses[index] = response
-                replayed.add(index)
             elif self._controller_kinds.get(player.player_id) == "llm":
                 pending.append(index)
             else:
-                responses[index] = self._controller_action(player, request)
+                response = self._controller_action(player, request)
+                responses[index] = response
+                entry = self._record_action(
+                    player,
+                    request,
+                    response,
+                    action_index=batch_start + index,
+                )
+                self._apply_action_side_effects(player, entry)
 
         futures: dict[int, Future[AgentResponse]] = {}
         heartbeat_stop = threading.Event()
@@ -1649,16 +1665,45 @@ class Game:
             executor = None
 
         try:
-            for index, (player, request) in enumerate(actions):
-                if index in futures:
-                    responses[index] = futures[index].result()
-                response = responses[index]
-                if response is None:
-                    msg = "Independent controller batch produced no response"
-                    raise RuntimeError(msg)
-                if index not in replayed:
-                    entry = self._record_action(player, request, response)
+            completed_futures: set[int] = set()
+            future_indexes = {future: index for index, future in futures.items()}
+            try:
+                for future in as_completed(future_indexes):
+                    index = future_indexes[future]
+                    response = future.result()
+                    responses[index] = response
+                    player, request = actions[index]
+                    entry = self._record_action(
+                        player,
+                        request,
+                        response,
+                        action_index=batch_start + index,
+                    )
                     self._apply_action_side_effects(player, entry)
+                    completed_futures.add(index)
+            except BaseException:
+                # A sibling may already have completed when the first failure
+                # is observed. Persist every successful completed response
+                # before propagating the batch failure.
+                for index, future in futures.items():
+                    if index in completed_futures or not future.done():
+                        continue
+                    with suppress(BaseException):
+                        response = future.result()
+                        responses[index] = response
+                        player, request = actions[index]
+                        entry = self._record_action(
+                            player,
+                            request,
+                            response,
+                            action_index=batch_start + index,
+                        )
+                        self._apply_action_side_effects(player, entry)
+                raise
+            if any(response is None for response in responses):
+                msg = "Independent controller batch produced no response"
+                raise RuntimeError(msg)
+            self._action_cursor = batch_start + len(actions)
         finally:
             heartbeat_stop.set()
             if heartbeat is not None:
@@ -1708,25 +1753,35 @@ class Game:
         player: PlayerState,
         request: ActionRequest,
         *,
+        action_index: int | None = None,
         legacy_private_result: Callable[[AgentResponse], str] | None = None,
     ) -> AgentResponse | None:
         """Replay a completed response from the per-call recovery journal."""
-        if self._action_cursor >= len(self._action_journal):
+        target_index = self._action_cursor if action_index is None else action_index
+        entry = next(
+            (
+                item
+                for position, item in enumerate(self._action_journal)
+                if int(item.get("action_index", position)) == target_index
+            ),
+            None,
+        )
+        if entry is None:
             return None
-        entry = self._action_journal[self._action_cursor]
         signature = self._action_signature(player, request)
         for key, value in signature.items():
             if entry.get(key) != value:
                 msg = (
                     "Checkpoint action journal diverged at index "
-                    f"{self._action_cursor}: expected {signature!r}, got {entry!r}"
+                    f"{target_index}: expected {signature!r}, got {entry!r}"
                 )
                 raise RuntimeError(msg)
         response = entry.get("response")
         if not isinstance(response, dict):
             msg = "Checkpoint action response is malformed"
             raise TypeError(msg)
-        self._action_cursor += 1
+        if action_index is None:
+            self._action_cursor += 1
         rng_state = entry.get("rng_state")
         if isinstance(rng_state, list) and len(rng_state) == 3:
             # Replaying a Bot answer skips the random draws that originally
@@ -1737,13 +1792,13 @@ class Game:
             )
         replayed = self._sanitize_response(
             AgentResponse(
-            choice=response.get("choice"),
-            text=str(response.get("text", "")),
-            thought=str(response.get("thought", "")),
-            note=str(response.get("note", "")),
-            used_fallback=bool(response.get("used_fallback", False)),
-            fallback_error=str(response.get("fallback_error", "")),
-            attempts=int(response.get("attempts", 1)),
+                choice=response.get("choice"),
+                text=str(response.get("text", "")),
+                thought=str(response.get("thought", "")),
+                note=str(response.get("note", "")),
+                used_fallback=bool(response.get("used_fallback", False)),
+                fallback_error=str(response.get("fallback_error", "")),
+                attempts=int(response.get("attempts", 1)),
             ),
         )
         side_effects = entry.get("side_effects")
@@ -1771,11 +1826,13 @@ class Game:
         request: ActionRequest,
         response: AgentResponse,
         *,
+        action_index: int | None = None,
         private_result_text: str = "",
     ) -> dict[str, object]:
         """Persist one successful controller response before applying its effects."""
         entry = {
             **self._action_signature(player, request),
+            "action_index": self._action_cursor if action_index is None else action_index,
             "response": asdict(response),
             "rng_state": self._serialized_rng_state(),
             "side_effects": {
@@ -1790,7 +1847,6 @@ class Game:
         if self._checkpoint_base_payload is None or self._checkpoint_path is None:
             return entry
         self._action_journal.append(entry)
-        self._action_cursor = len(self._action_journal)
         self._persist_action_journal()
         return entry
 
