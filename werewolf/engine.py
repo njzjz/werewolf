@@ -1879,6 +1879,9 @@ class Game:
         replayed = self._sanitize_response(
             AgentResponse(
                 choice=response.get("choice"),
+                # Old checkpoints predate explicit-choice tracking. Their
+                # already-accepted responses retain the legacy explicit value.
+                choice_provided=bool(response.get("choice_provided", True)),
                 text=str(response.get("text", "")),
                 thought=str(response.get("thought", "")),
                 note=str(response.get("note", "")),
@@ -2104,6 +2107,8 @@ class Game:
         format failure rather than a decision a person or local bot made.
         """
         legal = {option.value for option in request.options}
+        if is_llm and request.options and not response.choice_provided:
+            return f"missing choice for {request.kind.value}"
         if (
             request.options
             and response.choice not in legal
@@ -2145,6 +2150,23 @@ class Game:
 
     def _retry_feedback(self, request: ActionRequest, reason: str) -> str:
         """Explain a rejected answer to the controller in the game language."""
+        if reason.startswith("missing choice"):
+            abstain_instruction = (
+                self._t(
+                    "若确实要弃权，请显式写 choice: null。",
+                    "If you really abstain, explicitly set choice to null.",
+                )
+                if request.allow_abstain
+                else self._t(
+                    "本动作不允许弃权，请填写一个合法选项的 value。",
+                    "This action cannot abstain; provide one legal option value.",
+                )
+            )
+            return self._t(
+                f"上一次回答缺少 choice 字段；选择类动作必须始终包含该字段。{abstain_instruction}",
+                "Your previous response omitted the choice field; selection "
+                f"actions must always include it. {abstain_instruction}",
+            )
         if reason.startswith("empty text"):
             return self._t(
                 "上一次回答的 text 是空的；本轮必须给出非空的公开发言内容。",
@@ -2211,7 +2233,9 @@ class Game:
     @staticmethod
     def _safe_error_summary(detail: str) -> str:
         """Keep only diagnostics explicitly safe for shared output and exports."""
-        if detail.lower().startswith(("illegal choice", "empty text")):
+        if detail.lower().startswith(
+            ("illegal choice", "missing choice", "empty text")
+        ):
             return "invalid response"
         category, separator, message = detail.partition(":")
         if category in {"ProviderHTTPError", "ProviderProtocolError"} and separator:

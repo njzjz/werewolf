@@ -121,6 +121,39 @@ def test_llm_parser_accepts_fenced_json() -> None:
     assert parsed["text"] == "你好"
 
 
+def test_llm_tracks_explicit_null_separately_from_an_omitted_choice() -> None:
+    """Only a present ``choice: null`` field can express an abstention."""
+    outputs = iter(
+        (
+            '{"text":"","thought":"等待"}',
+            '{"choice":null,"text":"","thought":"明确弃权"}',
+        ),
+    )
+
+    def transport(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {"choices": [{"message": {"content": next(outputs)}}]}
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+        transport=transport,
+    )
+    controller = LLMController(client)
+    request = ActionRequest(
+        ActionKind.VOTE,
+        "请投票",
+        (ActionOption("p2", "2号 玩家2"),),
+        allow_abstain=True,
+    )
+
+    omitted = controller.act(seat_view(), request)
+    explicit = controller.act(seat_view(), request)
+
+    assert omitted.choice is None
+    assert omitted.choice_provided is False
+    assert explicit.choice is None
+    assert explicit.choice_provided is True
+
+
 def test_llm_does_not_force_an_empty_history_lookup() -> None:
     """Opening actions may use tools, but should not pay for a useless forced call."""
     captured: dict[str, Any] = {}

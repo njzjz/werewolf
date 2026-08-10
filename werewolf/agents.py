@@ -1636,6 +1636,7 @@ class LLMController:
         data = self._parse_json(raw)
         return AgentResponse(
             choice=self._resolve_choice(data.get("choice"), request),
+            choice_provided="choice" in data,
             text=self._optional_string(data.get("text")) or "",
             thought=self._optional_string(data.get("thought")) or "",
             note=self._optional_string(data.get("note")) or "",
@@ -1832,6 +1833,7 @@ class LLMController:
             '"rationale": "简短依据"}], "open_questions": ["待核验问题"], '
             '"plan": "下一步计划", "counter_case": "当前主判断最强的反方解释"}}\n'
             'choice 必须与合法选项里的某个 value 完全一致（例如 "p3"），不要填座位号、姓名或标签；'
+            "选择类动作必须始终包含 choice 字段；确实要弃权时必须显式填 null，不得省略该字段；"
             "不允许弃权时不得填 null。\n"
             "发言类动作的 text 不能为空，必须写出本轮真正要说的话；thought 与 note 请各自控制在 100 字以内，"
             "以免输出预算被占满导致回答被截断。公开发言不得逐句复述前面玩家；最多简短确认一个共识，"
