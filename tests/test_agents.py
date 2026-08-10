@@ -251,7 +251,7 @@ def test_chat_api_sends_configured_reasoning_effort() -> None:
 def test_chat_tools_continue_with_private_results_and_bounded_rounds() -> None:
     """Chat function calls should be executed and continued in one private loop."""
     captured: list[dict[str, Any]] = []
-    responses = [
+    responses: list[dict[str, Any]] = [
         {
             "choices": [
                 {
@@ -318,7 +318,7 @@ def test_chat_tools_continue_with_private_results_and_bounded_rounds() -> None:
 def test_responses_tools_preserve_output_items_for_continuation() -> None:
     """Responses reasoning and calls must be replayed before function output."""
     captured: list[dict[str, Any]] = []
-    responses = [
+    responses: list[dict[str, Any]] = [
         {
             "output": [
                 {"type": "reasoning", "id": "rs_1", "summary": []},
