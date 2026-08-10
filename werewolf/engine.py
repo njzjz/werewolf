@@ -1675,6 +1675,14 @@ class Game:
             msg = "Checkpoint action response is malformed"
             raise TypeError(msg)
         self._action_cursor += 1
+        rng_state = entry.get("rng_state")
+        if isinstance(rng_state, list) and len(rng_state) == 3:
+            # Replaying a Bot answer skips the random draws that originally
+            # produced it. Restore the recorded post-action state so every
+            # later judge and controller draw remains deterministic.
+            self.rng.setstate(
+                (int(rng_state[0]), tuple(rng_state[1]), rng_state[2]),
+            )
         return AgentResponse(
             choice=response.get("choice"),
             text=str(response.get("text", "")),
@@ -1697,6 +1705,7 @@ class Game:
         entry = {
             **self._action_signature(player, request),
             "response": asdict(response),
+            "rng_state": self._serialized_rng_state(),
         }
         self._action_journal.append(entry)
         self._action_cursor = len(self._action_journal)
@@ -1710,6 +1719,11 @@ class Game:
         }
         self._checkpoint_base_payload = payload
         self._write_checkpoint(payload)
+
+    def _serialized_rng_state(self) -> list[object]:
+        """Return the JSON-compatible state after one completed action."""
+        rng_state = self.rng.getstate()
+        return [rng_state[0], list(rng_state[1]), rng_state[2]]
 
     def _controller_action(
         self,

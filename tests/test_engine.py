@@ -1080,6 +1080,34 @@ def test_checkpoint_replays_each_completed_controller_call(tmp_path) -> None:
     assert checkpoint.stat().st_mode & 0o777 == 0o600
 
 
+def test_checkpoint_replay_restores_bot_rng_consumption(tmp_path) -> None:
+    """Skipping a journaled Bot call must still advance the shared RNG state."""
+    checkpoint = tmp_path / "private.checkpoint.json"
+    config = replace(fixed_config(), checkpoint_path=str(checkpoint))
+    game = Game(config, terminal=SilentTerminal())
+    game.day = 1
+    game.phase = "vote"
+    game._save_checkpoint(next_day=1, next_step="daytime")  # noqa: SLF001
+    request = ActionRequest(
+        ActionKind.VOTE,
+        "投票",
+        tuple(ActionOption(f"p{index}", f"玩家{index}") for index in range(2, 7)),
+    )
+
+    original = game._act(game._by_id["p1"], request)  # noqa: SLF001
+    expected_next_draw = game.rng.random()
+
+    resumed = Game(
+        config,
+        terminal=SilentTerminal(),
+        resume_checkpoint=checkpoint,
+    )
+    replayed = resumed._act(resumed._by_id["p1"], request)  # noqa: SLF001
+
+    assert replayed == original
+    assert resumed.rng.random() == expected_next_draw
+
+
 def test_players_receive_global_and_role_specific_skills() -> None:
     """Every seat should automatically receive only its own role playbook."""
     game = Game(fixed_config(), terminal=SilentTerminal())
