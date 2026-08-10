@@ -17,6 +17,7 @@ from werewolf.agents import (
     LLMController,
     OpenAICompatibleClient,
     ProviderHTTPError,
+    ProviderProtocolError,
     SafeFallbackController,
     Terminal,
 )
@@ -581,6 +582,26 @@ def test_provider_http_error_exposes_only_safe_structured_metadata() -> None:
     assert "messages" not in str(error)
 
 
+def test_provider_http_error_identifies_an_explicit_unsupported_field() -> None:
+    """Compatibility fallback metadata comes from structured 4xx details only."""
+    body = io.BytesIO(
+        b'{"error":{"code":"unknown_parameter","param":"stream_options",'
+        b'"message":"Unsupported parameter"}}',
+    )
+    raw = urllib.error.HTTPError(
+        "https://example.invalid/v1/chat/completions",
+        400,
+        "bad request",
+        Message(),
+        body,
+    )
+
+    error = OpenAICompatibleClient._http_error(raw)  # noqa: SLF001
+
+    assert error.unsupported_field == "stream_options"
+    assert "stream_options" not in str(error)
+
+
 def test_authenticated_provider_requests_disable_all_redirects() -> None:
     """A redirect must not create a second request carrying private headers."""
     client = OpenAICompatibleClient(
@@ -658,8 +679,7 @@ def test_chat_stream_requests_usage_and_retries_without_it_when_rejected() -> No
     def fake_read(payload: dict[str, Any]) -> str:
         sent.append(payload)
         if "stream_options" in payload:
-            msg = "LLM API returned HTTP 400: unsupported parameter stream_options"
-            raise RuntimeError(msg)
+            raise ProviderHTTPError(400, unsupported_field="stream_options")
         return '{"text":"完成"}'
 
     client._read_stream = fake_read  # type: ignore[assignment]  # noqa: SLF001
@@ -670,6 +690,36 @@ def test_chat_stream_requests_usage_and_retries_without_it_when_rejected() -> No
     assert sent[0]["stream"] is True
     assert sent[0]["stream_options"] == {"include_usage": True}
     assert "stream_options" not in sent[1]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("HTTP 500 body happened to mention stream_options"),
+        ProviderHTTPError(500, unsupported_field="stream_options"),
+        ProviderHTTPError(400, unsupported_field="another_field"),
+        ProviderProtocolError("Malformed streaming event mentioning stream_options"),
+    ],
+)
+def test_chat_stream_does_not_retry_on_unstructured_or_non_4xx_errors(
+    error: RuntimeError,
+) -> None:
+    """Only an explicit unsupported-field response may cause a second inference."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+    )
+    sent: list[dict[str, Any]] = []
+
+    def fake_read(payload: dict[str, Any]) -> str:
+        sent.append(payload)
+        raise error
+
+    client._read_stream = fake_read  # type: ignore[assignment]  # noqa: SLF001
+
+    with pytest.raises(type(error), match="stream_options|HTTP 500|request failed"):
+        client._post_stream({"model": "test"})  # noqa: SLF001
+
+    assert len(sent) == 1
 
 
 def test_sse_done_terminates_without_waiting_for_connection_close() -> None:

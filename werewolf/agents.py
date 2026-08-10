@@ -1026,8 +1026,11 @@ class OpenAICompatibleClient:
             return self._read_stream(
                 {**stream_payload, "stream_options": {"include_usage": True}},
             )
-        except RuntimeError as exc:
-            if "stream_options" not in str(exc):
+        except ProviderHTTPError as exc:
+            if not (
+                400 <= exc.status_code < 500
+                and exc.unsupported_field == "stream_options"
+            ):
                 raise
             return self._read_stream(stream_payload)
 
