@@ -10,6 +10,22 @@ from pathlib import Path
 
 from .config import ROLE_PRESET_SIZES, demo_config, load_config, write_example_config
 from .engine import Game
+from .rendering import sanitize_rendered_text
+
+
+def _print_resume_hint(active_checkpoint: str | None, config_path: str) -> None:
+    """Print one copyable recovery command when a private checkpoint exists."""
+    if active_checkpoint and Path(active_checkpoint).exists():
+        print(
+            f"恢复点已保留，可运行：werewolf play {config_path} "
+            f"--resume {active_checkpoint}",
+            file=sys.stderr,
+        )
+
+
+def _safe_cli_error(exc: BaseException) -> str:
+    """Bound and flatten exception text before writing it to the terminal."""
+    return sanitize_rendered_text(exc, limit=500).replace("\n", " ")
 
 
 def _config_path_from_args(args: argparse.Namespace) -> str:
@@ -249,30 +265,22 @@ def main(argv: list[str] | None = None) -> None:
                 else "\n游戏已中止。"
             )
         print(message, file=sys.stderr)
-        if active_checkpoint and Path(active_checkpoint).exists():
-            print(
-                f"恢复点已保留，可运行：werewolf play {config_path} "
-                f"--resume {active_checkpoint}",
-                file=sys.stderr,
-            )
+        _print_resume_hint(active_checkpoint, config_path)
         raise SystemExit(130) from None
     except RuntimeError as exc:
-        print(f"错误：{exc}", file=sys.stderr)
-        if active_checkpoint and Path(active_checkpoint).exists():
-            print(
-                f"恢复点已保留，可运行：werewolf play {config_path} "
-                f"--resume {active_checkpoint}",
-                file=sys.stderr,
-            )
+        print(f"错误：{_safe_cli_error(exc)}", file=sys.stderr)
+        _print_resume_hint(active_checkpoint, config_path)
+        raise SystemExit(2) from exc
+    except OSError as exc:
+        print(f"错误：{_safe_cli_error(exc)}", file=sys.stderr)
+        _print_resume_hint(active_checkpoint, config_path)
         raise SystemExit(2) from exc
     except (
-        FileNotFoundError,
-        FileExistsError,
         KeyError,
         TypeError,
         ValueError,
     ) as exc:
-        print(f"错误：{exc}", file=sys.stderr)
+        print(f"错误：{_safe_cli_error(exc)}", file=sys.stderr)
         raise SystemExit(2) from exc
 
 

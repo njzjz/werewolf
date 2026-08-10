@@ -2071,6 +2071,25 @@ def test_private_artifacts_use_restrictive_permissions_from_creation(
     assert all(path.stat().st_mode & 0o777 == 0o600 for path in paths)
 
 
+def test_memory_export_bounds_long_unicode_filenames_with_stable_hashes(
+    tmp_path,
+) -> None:
+    """Legacy or programmatic long names must stay within component byte limits."""
+    game = Game(fixed_config(), terminal=SilentTerminal())
+    game.players[0].name = "玩" * 100 + "甲"
+    game.players[1].name = "玩" * 100 + "乙"
+
+    first_paths = game.export_memories(tmp_path)
+    first_names = [path.name for path in first_paths[:2]]
+    second_names = [path.name for path in game.export_memories(tmp_path)[:2]]
+
+    assert all(len(name.encode("utf-8")) <= 240 for name in first_names)
+    assert first_names[0].startswith("p1_")
+    assert first_names[1].startswith("p2_")
+    assert first_names[0] != first_names[1]
+    assert first_names == second_names
+
+
 def test_invalid_role_count_is_rejected() -> None:
     """Unsupported table sizes should fail before a match starts."""
     with pytest.raises(ValueError, match="6 to 16"):

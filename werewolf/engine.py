@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import random
 import re
@@ -2577,11 +2578,7 @@ class Game:
         output.chmod(0o700)
         written: list[Path] = []
         for player in self.players:
-            safe_name = (
-                re.sub(r"[^\w.-]+", "_", player.name, flags=re.UNICODE).strip("_")
-                or player.player_id
-            )
-            path = output / f"{player.player_id}_{safe_name}.json"
+            path = output / self._memory_filename(player)
             payload = {
                 "player_id": player.player_id,
                 "name": player.name,
@@ -2600,6 +2597,34 @@ class Game:
             )
             written.append(path)
         return written
+
+    @staticmethod
+    def _memory_filename(player: PlayerState, *, byte_limit: int = 240) -> str:
+        """Return a portable component with a stable hash after byte truncation."""
+        safe_name = (
+            re.sub(r"[^\w.-]+", "_", player.name, flags=re.UNICODE).strip("_")
+            or player.player_id
+        )
+        prefix = f"{player.player_id}_"
+        suffix = ".json"
+        candidate = f"{prefix}{safe_name}{suffix}"
+        if len(candidate.encode("utf-8")) <= byte_limit:
+            return candidate
+        digest = hashlib.sha256(player.name.encode("utf-8")).hexdigest()[:12]
+        hash_suffix = f"_{digest}"
+        name_budget = byte_limit - len(
+            f"{prefix}{hash_suffix}{suffix}".encode("utf-8"),
+        )
+        encoded = safe_name.encode("utf-8")[:name_budget]
+        while encoded:
+            try:
+                truncated = encoded.decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                encoded = encoded[:-1]
+        else:
+            truncated = player.player_id
+        return f"{prefix}{truncated}{hash_suffix}{suffix}"
 
     def _alive(self) -> list[PlayerState]:
         return [player for player in self.players if player.alive]
