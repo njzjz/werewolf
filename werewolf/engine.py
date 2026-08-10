@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import random
 import re
@@ -216,7 +216,9 @@ class Game:
         )
         self._discussion_rng = random.Random(discussion_seed)  # noqa: S311
         checkpoint_value = (
-            resume_checkpoint if resume_checkpoint is not None else config.checkpoint_path
+            resume_checkpoint
+            if resume_checkpoint is not None
+            else config.checkpoint_path
         )
         self._checkpoint_path = (
             Path(checkpoint_value) if checkpoint_value is not None else None
@@ -290,13 +292,14 @@ class Game:
 
     def _refuse_existing_outputs(self) -> None:
         """Fail before a fresh run can overwrite artifacts owned by another game."""
-        occupied: list[Path] = []
-        for value in (
-            self.config.checkpoint_path,
-            self.config.public_transcript_path,
-        ):
-            if value is not None and Path(value).exists():
-                occupied.append(Path(value))
+        occupied = [
+            Path(value)
+            for value in (
+                self.config.checkpoint_path,
+                self.config.public_transcript_path,
+            )
+            if value is not None and Path(value).exists()
+        ]
         if self.config.memory_directory is not None:
             memory_directory = Path(self.config.memory_directory)
             if memory_directory.exists() and any(memory_directory.iterdir()):
@@ -478,9 +481,7 @@ class Game:
             msg = "Checkpoint player list is malformed"
             raise ValueError(msg)
         max_sequence = 0
-        for index, (player, saved) in enumerate(
-            zip(self.players, player_data),
-        ):
+        for player, saved in zip(self.players, player_data):
             if not isinstance(saved, dict):
                 msg = "Checkpoint player entry is malformed"
                 raise TypeError(msg)
@@ -614,7 +615,9 @@ class Game:
         if self.config.role_preset != "classic":
             skills = add_movie_survival_skill(skills)
         preset_deck = MOVIE_ROLE_DECKS.get(self.config.role_preset)
-        if preset_deck is not None and self._resolved_role_counts == Counter(preset_deck):
+        if preset_deck is not None and self._resolved_role_counts == Counter(
+            preset_deck
+        ):
             skills = add_preset_skill(skills, self.config.role_preset)
         return add_lover_skill(skills) if lover else skills
 
@@ -1878,7 +1881,9 @@ class Game:
         """Persist one successful controller response before applying its effects."""
         entry = {
             **self._action_signature(player, request),
-            "action_index": self._action_cursor if action_index is None else action_index,
+            "action_index": self._action_cursor
+            if action_index is None
+            else action_index,
             "response": asdict(response),
             "rng_state": self._serialized_rng_state(),
             "side_effects": {
@@ -1943,8 +1948,7 @@ class Game:
         if not response.used_fallback:
             return ""
         return self._t(
-            "控制器回答失败或无效，法官启用系统安全后备："
-            f"{response.fallback_error}",
+            f"控制器回答失败或无效，法官启用系统安全后备：{response.fallback_error}",
             "The controller response failed or was invalid; the judge used the "
             f"system safe fallback: {response.fallback_error}",
         )
@@ -2330,9 +2334,7 @@ class Game:
         fallback_marker = self._t("【系统安全后备】", "[system safe fallback]")
         safe_text = sanitize_rendered_text(text)
         sender = f"{label}{fallback_marker if fallback else ''}"
-        rendered = "\n".join(
-            f"{sender}：{line}" for line in safe_text.split("\n")
-        )
+        rendered = "\n".join(f"{sender}：{line}" for line in safe_text.split("\n"))
         self.boundary.public(
             day=self.day,
             phase=self.phase,
@@ -2638,7 +2640,7 @@ class Game:
         digest = hashlib.sha256(player.name.encode("utf-8")).hexdigest()[:12]
         hash_suffix = f"_{digest}"
         name_budget = byte_limit - len(
-            f"{prefix}{hash_suffix}{suffix}".encode("utf-8"),
+            f"{prefix}{hash_suffix}{suffix}".encode(),
         )
         encoded = safe_name.encode("utf-8")[:name_budget]
         while encoded:

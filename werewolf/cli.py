@@ -36,6 +36,13 @@ def _config_path_from_args(args: argparse.Namespace) -> str:
     return str(args.config_path or args.config_option or "werewolf.json")
 
 
+def _validate_play_modes(resume_checkpoint: str | None, force_new: bool) -> None:
+    """Reject mutually exclusive destructive and recovery modes."""
+    if resume_checkpoint and force_new:
+        msg = "--resume 与 --force-new 不能同时使用"
+        raise ValueError(msg)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Create the public CLI parser."""
     parser = argparse.ArgumentParser(
@@ -202,9 +209,7 @@ def main(argv: list[str] | None = None) -> None:
             if args.sequential_votes:
                 config = replace(config, parallel_llm_votes=False)
             resume_checkpoint = args.resume
-            if resume_checkpoint and args.force_new:
-                msg = "--resume 与 --force-new 不能同时使用"
-                raise ValueError(msg)
+            _validate_play_modes(resume_checkpoint, args.force_new)
             active_checkpoint = resume_checkpoint or config.checkpoint_path
         result = Game(
             config,

@@ -14,7 +14,7 @@
     }
   },
   "players": [
-    {"name": "你", "controller": "human"},
+    { "name": "你", "controller": "human" },
     "智能体1",
     "智能体2",
     "智能体3",
@@ -30,13 +30,13 @@
 
 省略字段时会采用以下推荐值：
 
-| 行为 | 推荐值 |
-| --- | --- |
-| 语言与牌组 | 中文、`classic` |
-| 运行安全 | 安全进度开启、严格控制器、失败重试 2 次 |
+| 行为       | 推荐值                                                      |
+| ---------- | ----------------------------------------------------------- |
+| 语言与牌组 | 中文、`classic`                                             |
+| 运行安全   | 安全进度开启、严格控制器、失败重试 2 次                     |
 | 恢复与日志 | `game_runs/private.checkpoint.json`、`game_runs/public.log` |
-| 终端体验 | 清屏、关键选择确认、LLM 投票并发 |
-| 记忆 | 导出到 `game_memories/` |
+| 终端体验   | 清屏、关键选择确认、LLM 投票并发                            |
+| 记忆       | 导出到 `game_memories/`                                     |
 
 若不需要某项文件输出，可以显式设置 `"checkpoint_path": null`、`"public_transcript_path": null` 或 `"memory_directory": null`。全部字段及当前值可通过 `werewolf init --full` 查看。
 
@@ -84,21 +84,21 @@
 
 这些字段都可以省略，只在需要覆盖推荐行为时填写：
 
-| 字段 | 用途 |
-| --- | --- |
-| `language` | `zh-CN` 或 `en`；控制法官文本和 LLM 语言要求 |
-| `seed` | 控制座位、身份洗牌、平票和本地 bot；不保证真实 LLM 输出可复现 |
-| `clear_screen` | 多真人共用终端时，在私密回合之间清屏 |
-| `context_char_limit` | 单个玩家可见历史进入 LLM 提示词的字符上限 |
-| `memory_directory` | 终局后导出每名玩家的独立记忆 |
-| `spectator_progress` | 显示不泄密的行动进度和单行推理耗时 |
-| `strict_controllers` | LLM 重试耗尽后终止并保留恢复点 |
-| `controller_retries` | 严格终止前，对同一个 LLM 动作的重试次数 |
-| `public_transcript_path` | 实时写入可公开分享的 UTF-8 观战日志 |
-| `checkpoint_path` | 保存含私密状态和响应日志的恢复点 |
-| `human_strategy_notes` | 真人行动后是否询问可选的私密策略笔记 |
-| `confirm_critical_actions` | 投票、用药、开枪、查验等真人选择是否二次确认 |
-| `parallel_llm_votes` | 并行请求互不可见的 LLM 公开投票 |
+| 字段                       | 用途                                                          |
+| -------------------------- | ------------------------------------------------------------- |
+| `language`                 | `zh-CN` 或 `en`；控制法官文本和 LLM 语言要求                  |
+| `seed`                     | 控制座位、身份洗牌、平票和本地 bot；不保证真实 LLM 输出可复现 |
+| `clear_screen`             | 多真人共用终端时，在私密回合之间清屏                          |
+| `context_char_limit`       | 单个玩家可见历史进入 LLM 提示词的字符上限                     |
+| `memory_directory`         | 终局后导出每名玩家的独立记忆                                  |
+| `spectator_progress`       | 显示不泄密的行动进度和单行推理耗时                            |
+| `strict_controllers`       | LLM 重试耗尽后终止并保留恢复点                                |
+| `controller_retries`       | 严格终止前，对同一个 LLM 动作的重试次数                       |
+| `public_transcript_path`   | 实时写入可公开分享的 UTF-8 观战日志                           |
+| `checkpoint_path`          | 保存含私密状态和响应日志的恢复点                              |
+| `human_strategy_notes`     | 真人行动后是否询问可选的私密策略笔记                          |
+| `confirm_critical_actions` | 投票、用药、开枪、查验等真人选择是否二次确认                  |
+| `parallel_llm_votes`       | 并行请求互不可见的 LLM 公开投票                               |
 
 ## 玩家控制器
 
@@ -119,18 +119,18 @@
 
 同一局可以配置多个 provider，混用 OpenAI、兼容代理或本地服务。
 
-| 字段 | 说明 |
-| --- | --- |
-| `base_url` | API 根地址，客户端自动补 `/responses` 或 `/chat/completions` |
-| `api_key_env` | 推荐的密钥来源环境变量 |
-| `api_key` | 仅适合本地占位密钥，不建议保存真实凭据 |
-| `model` | 服务实际接受的模型 ID |
-| `wire_api` | `responses` 或 `chat` |
-| `reasoning_effort` | 兼容 Responses 推理强度，例如 `low`、`high`、`xhigh` |
-| `use_json_mode` | 服务不支持 JSON mode 时设为 `false`；提示词仍要求 JSON |
-| `stream` | 默认开启，使用 SSE 接收增量，降低长推理经过代理时的超时风险 |
-| `force_ipv4` | IPv6 不可达时强制 IPv4，同时保留 TLS 主机名验证 |
-| `extra_headers` | 兼容服务要求的额外 HTTP 请求头 |
+| 字段               | 说明                                                         |
+| ------------------ | ------------------------------------------------------------ |
+| `base_url`         | API 根地址，客户端自动补 `/responses` 或 `/chat/completions` |
+| `api_key_env`      | 推荐的密钥来源环境变量                                       |
+| `api_key`          | 仅适合本地占位密钥，不建议保存真实凭据                       |
+| `model`            | 服务实际接受的模型 ID                                        |
+| `wire_api`         | `responses` 或 `chat`                                        |
+| `reasoning_effort` | 兼容 Responses 推理强度，例如 `low`、`high`、`xhigh`         |
+| `use_json_mode`    | 服务不支持 JSON mode 时设为 `false`；提示词仍要求 JSON       |
+| `stream`           | 默认开启，使用 SSE 接收增量，降低长推理经过代理时的超时风险  |
+| `force_ipv4`       | IPv6 不可达时强制 IPv4，同时保留 TLS 主机名验证              |
+| `extra_headers`    | 兼容服务要求的额外 HTTP 请求头                               |
 
 LLM 的增量内容不会直接打印到公开频道。客户端在本地组装完整 JSON，完成解析和合法性校验后，法官才会发布允许公开的文本。
 

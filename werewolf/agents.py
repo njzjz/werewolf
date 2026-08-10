@@ -193,12 +193,12 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(
         self,
-        request: urllib.request.Request,
-        file_pointer: object,
-        code: int,
-        message: str,
-        headers: object,
-        new_url: str,
+        _request: urllib.request.Request,
+        _file_pointer: object,
+        _code: int,
+        _message: str,
+        _headers: object,
+        _new_url: str,
     ) -> urllib.request.Request | None:
         """Return no follow-up request for every redirect status."""
         return None
@@ -249,11 +249,7 @@ class Terminal:
 
     def supports_private_handoff(self) -> bool:
         """Return whether pass-and-play secrets can be cleared between people."""
-        return (
-            self.clear_screen
-            and sys.stdin.isatty()
-            and sys.stdout.isatty()
-        )
+        return self.clear_screen and sys.stdin.isatty() and sys.stdout.isatty()
 
     def announce(self, text: str) -> None:
         """Print a public judge announcement."""
@@ -475,7 +471,9 @@ class Terminal:
                 f"死亡（{len(dead)}）：{'、'.join(dead) if dead else '无'}",
             )
         if view.mechanical_context:
-            self.private("state" if view.language == "en" else "状态", view.mechanical_context)
+            self.private(
+                "state" if view.language == "en" else "状态", view.mechanical_context
+            )
 
 
 class HumanController:
@@ -733,7 +731,9 @@ class OpenAICompatibleClient:
         reasoning_content = cls._content_text(message.get("reasoning_content"))
         if reasoning_content:
             return reasoning_content
-        raise ProviderProtocolError(cls._empty_content_error(choice.get("finish_reason")))
+        raise ProviderProtocolError(
+            cls._empty_content_error(choice.get("finish_reason"))
+        )
 
     @staticmethod
     def _empty_content_error(finish_reason: object) -> str:
@@ -1081,7 +1081,10 @@ class OpenAICompatibleClient:
         total = 0
         read_chunk = getattr(response, "read1", None)
         if not callable(read_chunk):
-            read_chunk = getattr(response, "read")
+            read_chunk = getattr(response, "read", None)
+        if not callable(read_chunk):
+            msg = "LLM API response body is not readable"
+            raise ProviderProtocolError(msg)
         while True:
             cls._set_stream_timeout(response, deadline)
             chunk = read_chunk(65536)

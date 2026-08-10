@@ -184,7 +184,10 @@ def _provider_from_dict(raw: object, *, path: str) -> LLMProviderConfig:
     raw = _object(raw, path)
     _reject_unknown(raw, set(LLMProviderConfig.__dataclass_fields__), path)
     extra_headers = _object(raw.get("extra_headers", {}), f"{path}.extra_headers")
-    if not all(isinstance(key, str) and isinstance(value, str) for key, value in extra_headers.items()):
+    if not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in extra_headers.items()
+    ):
         msg = f"{path}.extra_headers keys and values must be strings"
         raise TypeError(msg)
     return LLMProviderConfig(
@@ -244,7 +247,9 @@ def _player_from_dict(
     if controller == "llm" and provider is None:
         provider = default_provider
     skills = raw.get("skills", ["logic", "memory"])
-    if not isinstance(skills, list) or not all(isinstance(value, str) for value in skills):
+    if not isinstance(skills, list) or not all(
+        isinstance(value, str) for value in skills
+    ):
         msg = f"{path}.skills must be an array of strings"
         raise TypeError(msg)
     return PlayerConfig(
@@ -649,7 +654,9 @@ def _validate_runtime_schema(config: GameConfig) -> None:
             "reasoning_effort",
             "prompt_cache_retention",
         ):
-            _string(getattr(provider, field_name), f"{path}.{field_name}", allow_none=True)
+            _string(
+                getattr(provider, field_name), f"{path}.{field_name}", allow_none=True
+            )
         _number(provider.temperature, f"{path}.temperature")
         _number(provider.timeout, f"{path}.timeout")
         _integer(provider.max_tokens, f"{path}.max_tokens")
@@ -688,9 +695,7 @@ def _validate_runtime_schema(config: GameConfig) -> None:
         if value is not None
     }
     if len(set(outputs.values())) != len(outputs):
-        collisions = ", ".join(
-            f"{label}={path}" for label, path in outputs.items()
-        )
+        collisions = ", ".join(f"{label}={path}" for label, path in outputs.items())
         msg = f"Game output paths must be distinct after resolution: {collisions}"
         raise ValueError(msg)
 

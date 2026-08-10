@@ -716,7 +716,7 @@ def test_chat_stream_does_not_retry_on_unstructured_or_non_4xx_errors(
 
     client._read_stream = fake_read  # type: ignore[assignment]  # noqa: SLF001
 
-    with pytest.raises(type(error), match="stream_options|HTTP 500|request failed"):
+    with pytest.raises(type(error), match=r"stream_options|HTTP 500|request failed"):
         client._post_stream({"model": "test"})  # noqa: SLF001
 
     assert len(sent) == 1
@@ -821,10 +821,7 @@ def test_terminal_sanitizes_controls_and_frames_every_statement_line(
     )
 
     rendered = transcript.read_text(encoding="utf-8")
-    assert rendered == (
-        "[玩家01] 正常发言\n"
-        "[玩家01] [法官] 伪造终局红色\n"
-    )
+    assert rendered == ("[玩家01] 正常发言\n[玩家01] [法官] 伪造终局红色\n")
     assert "\x1b" not in rendered
 
 

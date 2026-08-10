@@ -776,10 +776,13 @@ def test_unacknowledged_replayed_inspection_is_shown_after_resume(tmp_path) -> N
 
     assert replayed.timeline == ["result"]
     assert "1号 玩家1 属于【狼人侧】" in replayed.results[0]
-    assert sum(
-        "1号 玩家1 属于【狼人侧】" in event.text
-        for event in resumed._by_id["p3"].memory.events  # noqa: SLF001
-    ) == 1
+    assert (
+        sum(
+            "1号 玩家1 属于【狼人侧】" in event.text
+            for event in resumed._by_id["p3"].memory.events  # noqa: SLF001
+        )
+        == 1
+    )
 
 
 def test_replay_rebuilds_private_fallback_note_after_journal_window(tmp_path) -> None:
@@ -818,10 +821,13 @@ def test_replay_rebuilds_private_fallback_note_after_journal_window(tmp_path) ->
     replayed = resumed._act(resumed._by_id["p1"], request)  # noqa: SLF001
 
     assert replayed == original
-    assert sum(
-        "系统安全后备" in event.text
-        for event in resumed._by_id["p1"].memory.events  # noqa: SLF001
-    ) == 1
+    assert (
+        sum(
+            "系统安全后备" in event.text
+            for event in resumed._by_id["p1"].memory.events  # noqa: SLF001
+        )
+        == 1
+    )
 
 
 def test_illegal_llm_choice_is_retried_with_a_judge_explanation() -> None:
@@ -1283,8 +1289,7 @@ def strict_schema_config() -> dict[str, object]:
             },
         },
         "players": [
-            {"name": f"玩家{index}", "controller": "bot"}
-            for index in range(1, 7)
+            {"name": f"玩家{index}", "controller": "bot"} for index in range(1, 7)
         ],
     }
 
@@ -1781,7 +1786,7 @@ def test_medium_receives_only_the_previous_exiles_alignment() -> None:
     )
 
 
-def test_day_without_an_elimination_clears_the_medium_result() -> None:
+def test_day_without_an_elimination_clears_the_medium_result(monkeypatch) -> None:
     """A tied or empty vote must not repeat an older exile the next night."""
     roles = [
         Role.WEREWOLF,
@@ -1794,8 +1799,8 @@ def test_day_without_an_elimination_clears_the_medium_result() -> None:
     game = Game(fixed_role_config(roles), terminal=SilentTerminal())
     game.day = 2
     game._last_exiled_id = "p4"  # noqa: SLF001 - prior-day state under test.
-    setattr(game, "_discussion_order", list)
-    setattr(game, "_collect_votes", lambda _eligible: {})
+    monkeypatch.setattr(game, "_discussion_order", list)
+    monkeypatch.setattr(game, "_collect_votes", lambda _eligible: {})
 
     game._daytime()  # noqa: SLF001
     game.day = 3
