@@ -42,6 +42,67 @@ def test_configure_exposes_the_interactive_workbench_aliases() -> None:
     assert parser.parse_args(["setup"]).command == "setup"
 
 
+def test_play_rejects_a_missing_provider_environment_key_before_startup(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """A missing operator credential must not create a half-started match."""
+    environment_name = "WEREWOLF_TEST_MISSING_API_KEY"
+    monkeypatch.delenv(environment_name, raising=False)
+    checkpoint = tmp_path / "private.checkpoint.json"
+    config_path = tmp_path / "game.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "checkpoint_path": str(checkpoint),
+                "public_transcript_path": None,
+                "memory_directory": None,
+                "roles": [
+                    "werewolf",
+                    "werewolf",
+                    "seer",
+                    "witch",
+                    "villager",
+                    "villager",
+                ],
+                "providers": {
+                    "default": {
+                        "base_url": "https://example.invalid/v1",
+                        "api_key_env": environment_name,
+                        "model": "test-model",
+                    },
+                },
+                "players": [
+                    {
+                        "name": f"智能体{index}",
+                        "controller": "llm",
+                        "provider": "default",
+                    }
+                    for index in range(1, 7)
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    class UnexpectedGame:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pytest.fail("Game must not be constructed without its configured key")
+
+    monkeypatch.setattr(cli_module, "Game", UnexpectedGame)
+
+    with pytest.raises(SystemExit) as captured:
+        main(["play", str(config_path)])
+
+    stderr = capsys.readouterr().err
+    assert captured.value.code == 2
+    assert environment_name in stderr
+    assert "当前终端" in stderr
+    assert not checkpoint.exists()
+    assert "Traceback" not in stderr
+
+
 def test_eof_is_a_recoverable_cli_interruption_with_resume_command(
     tmp_path,
     monkeypatch,
