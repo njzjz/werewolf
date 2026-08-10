@@ -141,6 +141,7 @@ def main(argv: list[str] | None = None) -> None:
     resume_checkpoint: str | None = None
     active_checkpoint: str | None = None
     config_path = "werewolf.json"
+    config = None
     try:
         if args.command == "init":
             path = write_example_config(args.path, force=args.force, full=args.full)
@@ -232,8 +233,28 @@ def main(argv: list[str] | None = None) -> None:
                     sort_keys=True,
                 ),
             )
-    except KeyboardInterrupt:
-        print("\n游戏已中止。", file=sys.stderr)
+    except (EOFError, KeyboardInterrupt) as exc:
+        interrupted_by_eof = isinstance(exc, EOFError)
+        language = getattr(config, "language", "zh-CN")
+        if language == "en":
+            message = (
+                "\nInput closed; the game was interrupted safely."
+                if interrupted_by_eof
+                else "\nGame interrupted."
+            )
+        else:
+            message = (
+                "\n输入已关闭，游戏已安全中止。"
+                if interrupted_by_eof
+                else "\n游戏已中止。"
+            )
+        print(message, file=sys.stderr)
+        if active_checkpoint and Path(active_checkpoint).exists():
+            print(
+                f"恢复点已保留，可运行：werewolf play {config_path} "
+                f"--resume {active_checkpoint}",
+                file=sys.stderr,
+            )
         raise SystemExit(130) from None
     except RuntimeError as exc:
         print(f"错误：{exc}", file=sys.stderr)
