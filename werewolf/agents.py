@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import math
+import os
 import random
 import re
 import socket
@@ -109,11 +111,13 @@ class ProviderHTTPError(RuntimeError):
         error_code: str | None = None,
         request_id: str | None = None,
         unsupported_field: str | None = None,
+        retry_after_seconds: float | None = None,
     ) -> None:
         self.status_code = status_code
         self.error_code = error_code
         self.request_id = request_id
         self.unsupported_field = unsupported_field
+        self.retry_after_seconds = retry_after_seconds
         details = [f"HTTP {status_code}"]
         if error_code:
             details.append(f"code={error_code}")
@@ -268,12 +272,18 @@ class Terminal:
         self._emit(label, text)
 
     def transient_progress(self, text: str) -> None:
-        """Update one in-place TTY status without appending it to public logs."""
+        """Update one muted in-place TTY status without polluting scrollback."""
         if not sys.stdout.isatty():
             return
         with self._output_lock:
             safe_text = sanitize_rendered_text(text).replace("\n", " ")
-            print(f"\r\033[2K[观战] {safe_text}", end="", flush=True)
+            muted = "\033[38;5;244m" if "NO_COLOR" not in os.environ else "\033[2m"
+            reset = "\033[0m"
+            print(
+                f"\r\033[2K{muted}[观战] {safe_text}{reset}",
+                end="",
+                flush=True,
+            )
             self._transient_progress_active = True
 
     def clear_transient_progress(self) -> None:
@@ -792,6 +802,8 @@ class OpenAICompatibleClient:
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
+        if self.config.reasoning_effort:
+            payload["reasoning_effort"] = self.config.reasoning_effort
         if self.config.use_json_mode:
             payload["response_format"] = {"type": "json_object"}
         return payload
@@ -935,11 +947,19 @@ class OpenAICompatibleClient:
             )
             if any(marker in message for marker in unsupported_markers):
                 unsupported_field = parameter
+        retry_after_seconds = None
+        retry_after = exc.headers.get("retry-after")
+        if retry_after is not None:
+            with suppress(ValueError):
+                parsed_retry_after = float(retry_after)
+                if math.isfinite(parsed_retry_after):
+                    retry_after_seconds = min(max(parsed_retry_after, 0.0), 120.0)
         return ProviderHTTPError(
             exc.code,
             error_code=error_code,
             request_id=request_id,
             unsupported_field=unsupported_field,
+            retry_after_seconds=retry_after_seconds,
         )
 
     def _request(self, payload: dict[str, Any]) -> urllib.request.Request:
@@ -1350,6 +1370,8 @@ class LLMController:
             f"{language_rule}\n你在本局的公开称呼：{view.own_label}\n"
             f"你的名字：{view.name}\n你的座位号：{view.seat_number or '未提供'}\n"
             "自我介绍和任何自称都必须使用上面这个座位号，不要把自己的名字当成别人的座位号。\n"
+            "座位表中的所有 name 都是玩家专名；即使某人的名字恰好是“你”，也只指那个座位，"
+            "绝不指代正在阅读提示词的你。\n"
             f"你的身份：{view.role_name}\n"
             f"身份说明：{view.role_description}\n人物设定：{self.persona or '自然参与游戏'}\n"
             f"恋人信息：{view.lover[1] if view.lover else '无'}\n"
@@ -1360,7 +1382,11 @@ class LLMController:
             'choice 必须与合法选项里的某个 value 完全一致（例如 "p3"），不要填座位号、姓名或标签；'
             "不允许弃权时不得填 null。\n"
             "发言类动作的 text 不能为空，必须写出本轮真正要说的话；thought 与 note 请各自控制在 100 字以内，"
-            "以免输出预算被占满导致回答被截断。"
+            "以免输出预算被占满导致回答被截断。公开发言不得逐句复述前面玩家；最多简短确认一个共识，"
+            "随后必须给出至少一个尚未出现的具体判断、证据比较、反方解释或出票计划。"
+            "不要把真实身份当作固定开场白；只有身份声明能改变当前决策时才考虑公开，且可按阵营策略伪装。"
+            "解释已经完成的夜间行动时，只能引用该行动发生前已经获知的信息；不得用后来出现的白天发言"
+            "反向编造验人、用药、守护或袭击理由。"
         )
         event_lines = [
             f"#{event.sequence} D{event.day}/{event.phase} [{event.visibility.value}] {event.text}"

@@ -66,11 +66,13 @@ TUI 支持方向键、`j`/`k`、Enter 和 Esc；在管道或无完整终端能�
     "default": {
       "base_url": "https://api.openai.com/v1",
       "api_key_env": "OPENAI_API_KEY",
-      "model": "your-model-id"
+      "model": "your-model-id",
+      "wire_api": "responses",
+      "reasoning_effort": "high"
     }
   },
   "players": [
-    { "name": "你", "controller": "human" },
+    { "name": "真人玩家", "controller": "human" },
     "智能体1",
     "智能体2",
     "智能体3",
@@ -82,7 +84,11 @@ TUI 支持方向键、`j`/`k`、Enter 和 Esc；在管道或无完整终端能�
 }
 ```
 
-未写出的选项采用推荐值：中文、经典牌组、随机座位、安全进度、严格控制器、两次重试、公开日志 `game_runs/public.log` 和私密恢复点 `game_runs/private.checkpoint.json`。因此正常开局只需要：
+`reasoning_effort` 省略时不是“自动最高”，而是完全交给模型服务默认处理。质量优先的新配置显式使用 `high`；`xhigh`、`max` 等更高档位只有部分模型或兼容服务支持，应按 Provider 文档选择。Chat Completions 和 Responses 两条请求路径都会传递已配置的推理强度。模型 ID 中的 `flash`、`mini` 等通常代表速度/成本取向，仅提高推理强度不一定能弥补基础模型能力差距。
+
+玩家名是公开提示词的一部分，不建议使用代词 `你`；其他 LLM 可能把“1号 你”误认为自己。模板因此使用明确的专名 `真人玩家`。
+
+未写出的选项采用推荐值：中文、经典牌组、随机座位、安全进度、严格控制器、两次重试、最多 4 个并发模型请求、公开日志 `game_runs/public.log` 和私密恢复点 `game_runs/private.checkpoint.json`。等待模型时只显示一条灰色临时状态，动作结束后会自动擦除，不写入公开日志。因此正常开局只需要：
 
 ```bash
 werewolf play
