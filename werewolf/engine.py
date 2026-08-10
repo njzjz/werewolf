@@ -259,6 +259,7 @@ class Game:
             raise ValueError(msg)
         self._controller_kinds: dict[str, str] = {}
         roles = self._roles(seats)
+        self._resolved_role_counts = Counter(roles)
         self.players: list[PlayerState] = []
         for index, (seat, role) in enumerate(zip(seats, roles), start=1):
             player_id = f"p{index}"
@@ -492,11 +493,6 @@ class Game:
             player.role = Role(str(saved["role"]))
             player.alive = bool(saved["alive"])
             player.lover_id = saved.get("lover_id")
-            player.skills = self._build_player_skills(
-                player.role,
-                self._seat_configs[index].skills,
-                lover=player.lover_id is not None,
-            )
             player.memory.events = [
                 MemoryEvent(
                     sequence=int(event["sequence"]),
@@ -518,6 +514,13 @@ class Game:
             ]
             max_sequence = max(
                 [max_sequence, *(event.sequence for event in player.memory.events)],
+            )
+        self._resolved_role_counts = Counter(player.role for player in self.players)
+        for index, player in enumerate(self.players):
+            player.skills = self._build_player_skills(
+                player.role,
+                self._seat_configs[index].skills,
+                lover=player.lover_id is not None,
             )
         self.boundary.continue_after(max_sequence)
         self.day = int(raw["day"])
@@ -610,7 +613,9 @@ class Game:
         skills = resolve_player_skills(role, list(configured))
         if self.config.role_preset != "classic":
             skills = add_movie_survival_skill(skills)
-        skills = add_preset_skill(skills, self.config.role_preset)
+        preset_deck = MOVIE_ROLE_DECKS.get(self.config.role_preset)
+        if preset_deck is not None and self._resolved_role_counts == Counter(preset_deck):
+            skills = add_preset_skill(skills, self.config.role_preset)
         return add_lover_skill(skills) if lover else skills
 
     def _clear_checkpoint(self) -> None:

@@ -1487,11 +1487,9 @@ def test_players_receive_global_and_role_specific_skills() -> None:
         fixed_role_config(
             [
                 Role.WEREWOLF,
-                Role.MADMAN,
+                *([Role.MADMAN] * 7),
                 Role.SEER,
                 Role.BODYGUARD,
-                Role.MADMAN,
-                Role.MADMAN,
             ],
             "movie_mad_land",
         ),
@@ -1518,6 +1516,37 @@ def test_players_receive_global_and_role_specific_skills() -> None:
     )
     assert all(
         "board_movie_mad_land" not in {skill.name for skill in player.skills}
+        for player in game.players
+    )
+
+
+def test_incompatible_custom_deck_does_not_receive_mad_land_board_facts() -> None:
+    """Exact public composition guidance must match the resolved custom deck."""
+    roles = (*([Role.WEREWOLF] * 2), *([Role.VILLAGER] * 8))
+    config = GameConfig(
+        language="zh-CN",
+        players=tuple(
+            PlayerConfig(name=f"玩家{index}", controller="bot")
+            for index in range(1, 11)
+        ),
+        roles=roles,
+        role_preset="movie_mad_land",
+        seed=1,
+        clear_screen=False,
+        memory_directory=None,
+        spectator_progress=False,
+        rules=RuleConfig(randomize_seating=False),
+    )
+
+    game = Game(config, terminal=SilentTerminal())
+
+    assert Counter(player.role for player in game.players) == Counter(roles)
+    assert all(
+        "board_movie_mad_land" not in {skill.name for skill in player.skills}
+        for player in game.players
+    )
+    assert all(
+        "global_movie_survival" in {skill.name for skill in player.skills}
         for player in game.players
     )
 
