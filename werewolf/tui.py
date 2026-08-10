@@ -1383,6 +1383,14 @@ class ConfigurationTUI:
                         "context",
                         f"LLM 历史字符上限        {config.context_char_limit}",
                     ),
+                    Choice(
+                        "tools",
+                        f"LLM 只读证据工具        {self._on_off(config.enable_tools)}",
+                    ),
+                    Choice(
+                        "tool_rounds",
+                        f"单动作工具轮数上限      {config.max_tool_rounds}",
+                    ),
                     Choice("reset", "恢复推荐体验设置"),
                     Choice("done", "完成"),
                 ],
@@ -1480,6 +1488,19 @@ class ConfigurationTUI:
                         maximum=10_000_000,
                     ),
                 )
+            elif selected == "tools":
+                self.config = replace(config, enable_tools=not config.enable_tools)
+            elif selected == "tool_rounds":
+                self.config = replace(
+                    config,
+                    max_tool_rounds=self.ui.number_input(
+                        "单动作工具轮数上限",
+                        "限制模型与只读证据工具往返次数；推荐 2，兼顾推理质量与延迟。",
+                        default=config.max_tool_rounds,
+                        minimum=1,
+                        maximum=8,
+                    ),
+                )
             elif selected == "reset":
                 self.config = replace(
                     config,
@@ -1495,6 +1516,8 @@ class ConfigurationTUI:
                     parallel_llm_votes=True,
                     max_parallel_llm_requests=4,
                     context_char_limit=24000,
+                    enable_tools=True,
+                    max_tool_rounds=2,
                 )
             self.dirty = True
 
@@ -1736,7 +1759,12 @@ class ConfigurationTUI:
         """Return the safety posture shown on the dashboard."""
         checkpoint = "恢复点开启" if self.config.checkpoint_path else "无恢复点"
         strict = "严格模式" if self.config.strict_controllers else "允许安全后备"
-        return f"{strict} · {checkpoint} · 重试 {self.config.controller_retries} 次"
+        tools = (
+            f"证据工具 {self.config.max_tool_rounds} 轮"
+            if self.config.enable_tools
+            else "证据工具关闭"
+        )
+        return f"{strict} · {checkpoint} · 重试 {self.config.controller_retries} 次 · {tools}"
 
     @staticmethod
     def _player_description(player: PlayerConfig) -> str:

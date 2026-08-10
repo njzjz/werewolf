@@ -708,6 +708,8 @@ class Game:
             OpenAICompatibleClient(provider),
             persona=persona,
             context_char_limit=self.config.context_char_limit,
+            enable_tools=self.config.enable_tools,
+            max_tool_rounds=self.config.max_tool_rounds,
         )
 
     def run(self) -> GameResult:
@@ -774,6 +776,13 @@ class Game:
                 self._t(
                     "未配置私密恢复点；中止后无法继续当前对局。",
                     "No private checkpoint is configured; an interrupted match cannot be resumed.",
+                ),
+            )
+        if not self.config.enable_tools:
+            notices.append(
+                self._t(
+                    "LLM 只读证据工具已关闭；长局中的历史回溯和票型核对可能变弱。",
+                    "Read-only LLM evidence tools are disabled; history recall and vote analysis may be weaker in long matches.",
                 ),
             )
         providers = [
@@ -2653,8 +2662,17 @@ class Game:
         output_tokens = sum(client.observed_output_tokens for client in clients)
         usage_responses = sum(client.observed_usage_responses for client in clients)
         cache_reports = sum(client.observed_cache_reports for client in clients)
+        tool_calls = sum(client.observed_tool_calls for client in clients)
+        tool_failures = sum(client.observed_tool_failures for client in clients)
         if input_tokens <= 0:
-            return ""
+            if tool_calls <= 0:
+                return ""
+            return self._t(
+                f"本进程 LLM 工具调用 {tool_calls} 次，其中失败 {tool_failures} 次；"
+                "provider 未返回 token usage。",
+                f"LLM tools used {tool_calls} times in this process, with "
+                f"{tool_failures} failures; provider token usage was unavailable.",
+            )
         if cache_reports <= 0:
             # Reporting 0% here would blame prefix caching for a provider that
             # simply omits the cache fields, so say the share is unknown.
@@ -2680,10 +2698,12 @@ class Game:
         return self._t(
             "本进程已观测到的 LLM token："
             f"输入 {input_tokens}，{cache_text}，"
-            f"输出 {output_tokens}；provider 返回 usage 的响应共 {usage_responses} 次。",
+            f"输出 {output_tokens}；provider 返回 usage 的响应共 {usage_responses} 次；"
+            f"工具调用 {tool_calls} 次，其中失败 {tool_failures} 次。",
             "LLM tokens observed in this process: "
             f"{input_tokens} input, {cache_text}, "
-            f"{output_tokens} output across {usage_responses} responses with usage.",
+            f"{output_tokens} output across {usage_responses} responses with usage; "
+            f"{tool_calls} tool calls with {tool_failures} failures.",
         )
 
     def export_memories(self, directory: str | Path) -> list[Path]:

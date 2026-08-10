@@ -560,6 +560,8 @@ def test_llm_token_summary_reports_cache_hits_without_private_context() -> None:
     client.observed_output_tokens = 100
     client.observed_usage_responses = 2
     client.observed_cache_reports = 2
+    client.observed_tool_calls = 3
+    client.observed_tool_failures = 1
     game = Game(
         fixed_config(),
         controllers={"p1": LLMController(client, persona="私密人物设定")},
@@ -570,6 +572,7 @@ def test_llm_token_summary_reports_cache_hits_without_private_context() -> None:
 
     assert "输入 2000" in summary
     assert "缓存命中 1200（60.0%）" in summary
+    assert "工具调用 3 次，其中失败 1 次" in summary
     assert "私密人物设定" not in summary
 
 
@@ -1245,6 +1248,8 @@ def test_generated_config_uses_recommended_defaults_without_listing_them(
     assert config.public_transcript_path == "game_runs/public.log"
     assert config.parallel_llm_votes is True
     assert config.max_parallel_llm_requests == 4
+    assert config.enable_tools is True
+    assert config.max_tool_rounds == 2
     assert config.human_strategy_notes is False
     assert config.providers["default"].stream is True
     assert config.providers["default"].wire_api == "responses"
@@ -1265,6 +1270,8 @@ def test_full_example_config_remains_available_for_advanced_options() -> None:
     assert config["providers"]["default"]["stream"] is True
     assert config["providers"]["default"]["reasoning_effort"] == "high"
     assert config["max_parallel_llm_requests"] == 4
+    assert config["enable_tools"] is True
+    assert config["max_tool_rounds"] == 2
 
 
 def test_custom_role_counts_and_partial_fixed_roles_are_supported(
