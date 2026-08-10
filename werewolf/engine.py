@@ -1488,21 +1488,13 @@ class Game:
         """
         if private_result is not None:
             request = replace(request, returns_private_result=True)
-        replayed = self._replay_action(player, request)
+        replayed = self._replay_action(
+            player,
+            request,
+            legacy_private_result=private_result,
+        )
         if replayed is not None:
-            response = replayed
-            private_note = "\n".join(
-                part for part in (response.thought, response.note) if part.strip()
-            )
-            player.memory.reflect(self.day, self.phase, private_note)
-            if private_result is not None:
-                # The original player already read this during the lost run.
-                self._deliver_private_result(
-                    player,
-                    private_result(response),
-                    display=False,
-                )
-            return response
+            return replayed
         heartbeat_stop = threading.Event()
         heartbeat: threading.Thread | None = None
         if self.config.spectator_progress:
@@ -1517,18 +1509,21 @@ class Game:
                 heartbeat.start()
         try:
             response = self._controller_action(player, request)
-            self._record_action(player, request, response)
+            private_result_text = (
+                private_result(response) if private_result is not None else ""
+            )
+            entry = self._record_action(
+                player,
+                request,
+                response,
+                private_result_text=private_result_text,
+            )
+            self._apply_action_side_effects(player, entry)
         finally:
             heartbeat_stop.set()
             if heartbeat is not None:
                 heartbeat.join(timeout=1)
                 self.terminal.clear_transient_progress()
-        private_note = "\n".join(
-            part for part in (response.thought, response.note) if part.strip()
-        )
-        player.memory.reflect(self.day, self.phase, private_note)
-        if private_result is not None:
-            self._deliver_private_result(player, private_result(response))
         return response
 
     def _deliver_private_result(
@@ -1614,11 +1609,8 @@ class Game:
                     msg = "Independent controller batch produced no response"
                     raise RuntimeError(msg)
                 if index not in replayed:
-                    self._record_action(player, request, response)
-                private_note = "\n".join(
-                    part for part in (response.thought, response.note) if part.strip()
-                )
-                player.memory.reflect(self.day, self.phase, private_note)
+                    entry = self._record_action(player, request, response)
+                    self._apply_action_side_effects(player, entry)
         finally:
             heartbeat_stop.set()
             if heartbeat is not None:
@@ -1665,6 +1657,8 @@ class Game:
         self,
         player: PlayerState,
         request: ActionRequest,
+        *,
+        legacy_private_result: Callable[[AgentResponse], str] | None = None,
     ) -> AgentResponse | None:
         """Replay a completed response from the per-call recovery journal."""
         if self._action_cursor >= len(self._action_journal):
@@ -1691,7 +1685,7 @@ class Game:
             self.rng.setstate(
                 (int(rng_state[0]), tuple(rng_state[1]), rng_state[2]),
             )
-        return AgentResponse(
+        replayed = AgentResponse(
             choice=response.get("choice"),
             text=str(response.get("text", "")),
             thought=str(response.get("thought", "")),
@@ -1700,23 +1694,58 @@ class Game:
             fallback_error=str(response.get("fallback_error", "")),
             attempts=int(response.get("attempts", 1)),
         )
+        side_effects = entry.get("side_effects")
+        if isinstance(side_effects, dict):
+            self._apply_action_side_effects(player, entry)
+        else:
+            # Version-1 journals written before transactional side effects
+            # assumed the result had already been displayed. Preserve that
+            # behavior while rebuilding the old memory representation.
+            private_note = "\n".join(
+                part for part in (replayed.thought, replayed.note) if part.strip()
+            )
+            player.memory.reflect(self.day, self.phase, private_note)
+            if legacy_private_result is not None:
+                self._deliver_private_result(
+                    player,
+                    legacy_private_result(replayed),
+                    display=False,
+                )
+        return replayed
 
     def _record_action(
         self,
         player: PlayerState,
         request: ActionRequest,
         response: AgentResponse,
-    ) -> None:
+        *,
+        private_result_text: str = "",
+    ) -> dict[str, object]:
         """Persist one successful controller response before applying its effects."""
-        if self._checkpoint_base_payload is None or self._checkpoint_path is None:
-            return
         entry = {
             **self._action_signature(player, request),
             "response": asdict(response),
             "rng_state": self._serialized_rng_state(),
+            "side_effects": {
+                "private_note": "\n".join(
+                    part for part in (response.thought, response.note) if part.strip()
+                ),
+                "fallback_note": self._fallback_private_note(response),
+                "private_result": private_result_text,
+                "private_result_delivered": False,
+            },
         }
+        if self._checkpoint_base_payload is None or self._checkpoint_path is None:
+            return entry
         self._action_journal.append(entry)
         self._action_cursor = len(self._action_journal)
+        self._persist_action_journal()
+        return entry
+
+    def _persist_action_journal(self) -> None:
+        """Write the current response journal and delivery acknowledgements."""
+        if self._checkpoint_base_payload is None or self._checkpoint_path is None:
+            return
         payload = {
             **self._checkpoint_base_payload,
             "action_journal": self._action_journal,
@@ -1727,6 +1756,44 @@ class Game:
         }
         self._checkpoint_base_payload = payload
         self._write_checkpoint(payload)
+
+    def _apply_action_side_effects(
+        self,
+        player: PlayerState,
+        entry: dict[str, object],
+    ) -> None:
+        """Rebuild private effects and acknowledge any human-only result display."""
+        side_effects = entry.get("side_effects")
+        if not isinstance(side_effects, dict):
+            msg = "Checkpoint action side effects are malformed"
+            raise TypeError(msg)
+        private_note = str(side_effects.get("private_note", ""))
+        player.memory.reflect(self.day, self.phase, private_note)
+        fallback_note = str(side_effects.get("fallback_note", ""))
+        if fallback_note:
+            self._record_private_fallback_note(player, fallback_note)
+        private_result = str(side_effects.get("private_result", ""))
+        if private_result:
+            self._deliver_private_result(player, private_result, display=False)
+        if not bool(side_effects.get("private_result_delivered", False)):
+            if private_result and isinstance(player.controller, PrivateResultReceiver):
+                player.controller.receive_private_result(
+                    self._view(player),
+                    private_result,
+                )
+            side_effects["private_result_delivered"] = True
+            self._persist_action_journal()
+
+    def _fallback_private_note(self, response: AgentResponse) -> str:
+        """Render the private audit note generated by a safe fallback."""
+        if not response.used_fallback:
+            return ""
+        return self._t(
+            "控制器回答失败或无效，法官启用系统安全后备："
+            f"{response.fallback_error}",
+            "The controller response failed or was invalid; the judge used the "
+            f"system safe fallback: {response.fallback_error}",
+        )
 
     def _serialized_rng_state(self) -> list[object]:
         """Return the JSON-compatible state after one completed action."""
@@ -1772,13 +1839,6 @@ class Game:
                         last_error,
                     )
                     raise RuntimeError(msg) from exc
-                self._record_private_fallback_note(
-                    player,
-                    self._t(
-                        f"控制器调用失败，法官启用系统安全后备：{last_error}",
-                        f"Controller failed; judge used the system safe fallback: {last_error}",
-                    ),
-                )
                 return self._safe_fallback(player, request, last_error, attempt + 1)
 
             reason = self._rejection_reason(request, response, is_llm=is_llm)
@@ -1796,13 +1856,6 @@ class Game:
             if self.config.strict_controllers:
                 msg = self._strict_controller_error(player, request, last_error)
                 raise RuntimeError(msg)
-            self._record_private_fallback_note(
-                player,
-                self._t(
-                    f"回答无效（{last_error}），法官改用系统安全后备。",
-                    f"Invalid response ({last_error}); judge selected the system safe fallback.",
-                ),
-            )
             return self._safe_fallback(player, request, last_error, attempt + 1)
         msg = "Controller retry loop ended without a response"
         raise RuntimeError(msg)

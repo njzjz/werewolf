@@ -680,6 +680,93 @@ def test_replayed_inspection_rebuilds_memory_without_showing_it_again(
     )
 
 
+def test_unacknowledged_replayed_inspection_is_shown_after_resume(tmp_path) -> None:
+    """A crash after journaling must not hide a human Seer's unread result."""
+    roles = [
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        Role.SEER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+    ]
+    checkpoint = tmp_path / "private.checkpoint.json"
+    config = replace(fixed_role_config(roles), checkpoint_path=str(checkpoint))
+    game = Game(
+        config,
+        controllers={"p3": SeatController([AgentResponse(choice="p1")])},
+        terminal=SilentTerminal(),
+    )
+    game.day = 1
+    game.phase = "night"
+    game._save_checkpoint(next_day=1, next_step="night")  # noqa: SLF001
+    game._apply_action_side_effects = (  # type: ignore[method-assign]  # noqa: SLF001
+        lambda *_args: None
+    )
+
+    game._seer_turn()  # noqa: SLF001
+
+    replayed = SeatController([])
+    resumed = Game(
+        config,
+        controllers={"p3": replayed},
+        resume_checkpoint=checkpoint,
+        terminal=SilentTerminal(),
+    )
+    resumed.day = 1
+    resumed.phase = "night"
+    resumed._seer_turn()  # noqa: SLF001
+
+    assert replayed.timeline == ["result"]
+    assert "1号 玩家1 属于【狼人侧】" in replayed.results[0]
+    assert sum(
+        "1号 玩家1 属于【狼人侧】" in event.text
+        for event in resumed._by_id["p3"].memory.events  # noqa: SLF001
+    ) == 1
+
+
+def test_replay_rebuilds_private_fallback_note_after_journal_window(tmp_path) -> None:
+    """A journaled fallback must recreate its private audit note exactly once."""
+    checkpoint = tmp_path / "private.checkpoint.json"
+    config = replace(
+        fixed_config(),
+        checkpoint_path=str(checkpoint),
+        strict_controllers=False,
+    )
+    game = Game(
+        config,
+        controllers={"p1": FailingController()},
+        terminal=SilentTerminal(),
+    )
+    game.day = 1
+    game.phase = "vote"
+    game._save_checkpoint(next_day=1, next_step="daytime")  # noqa: SLF001
+    game._apply_action_side_effects = (  # type: ignore[method-assign]  # noqa: SLF001
+        lambda *_args: None
+    )
+    request = ActionRequest(
+        ActionKind.VOTE,
+        "投票",
+        (ActionOption("p2", "玩家2"),),
+        allow_abstain=True,
+    )
+
+    original = game._act(game._by_id["p1"], request)  # noqa: SLF001
+    resumed = Game(
+        config,
+        controllers={"p1": FailingController()},
+        resume_checkpoint=checkpoint,
+        terminal=SilentTerminal(),
+    )
+    replayed = resumed._act(resumed._by_id["p1"], request)  # noqa: SLF001
+
+    assert replayed == original
+    assert sum(
+        "系统安全后备" in event.text
+        for event in resumed._by_id["p1"].memory.events  # noqa: SLF001
+    ) == 1
+
+
 def test_illegal_llm_choice_is_retried_with_a_judge_explanation() -> None:
     """A rejected vote must tell the model what to fix instead of ending the game."""
     controller = RecordingController(
