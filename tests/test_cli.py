@@ -33,6 +33,15 @@ def test_init_can_request_the_exhaustive_reference_template() -> None:
     assert args.full is True
 
 
+def test_configure_exposes_the_interactive_workbench_aliases() -> None:
+    """The TUI should be discoverable through common configuration verbs."""
+    parser = build_parser()
+
+    assert parser.parse_args(["configure", "custom.json"]).path == "custom.json"
+    assert parser.parse_args(["config"]).command == "config"
+    assert parser.parse_args(["setup"]).command == "setup"
+
+
 def test_eof_is_a_recoverable_cli_interruption_with_resume_command(
     tmp_path,
     monkeypatch,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import tempfile
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -820,6 +821,101 @@ def write_example_config(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    return config_path
+
+
+def config_to_dict(config: GameConfig) -> dict[str, Any]:
+    """Return a complete JSON-compatible representation of a validated config.
+
+    The interactive configurator deliberately writes the complete schema.  This
+    makes its output predictable to inspect by hand while preserving advanced
+    values loaded from an existing file, including per-seat personas and skills.
+    """
+    validate_config(config)
+    roles = None
+    if config.roles is not None:
+        roles = [role.value for role in config.roles]
+    return {
+        "language": config.language,
+        "seed": config.seed,
+        "clear_screen": config.clear_screen,
+        "memory_directory": config.memory_directory,
+        "context_char_limit": config.context_char_limit,
+        "role_preset": config.role_preset,
+        "roles": roles,
+        "spectator_progress": config.spectator_progress,
+        "strict_controllers": config.strict_controllers,
+        "controller_retries": config.controller_retries,
+        "public_transcript_path": config.public_transcript_path,
+        "checkpoint_path": config.checkpoint_path,
+        "human_strategy_notes": config.human_strategy_notes,
+        "confirm_critical_actions": config.confirm_critical_actions,
+        "parallel_llm_votes": config.parallel_llm_votes,
+        "providers": {
+            name: asdict(provider) for name, provider in config.providers.items()
+        },
+        "rules": asdict(config.rules),
+        "players": [
+            {
+                "name": player.name,
+                "controller": player.controller,
+                "provider": player.provider,
+                "persona": player.persona,
+                "skills": list(player.skills),
+                "fixed_role": (
+                    player.fixed_role.value if player.fixed_role is not None else None
+                ),
+            }
+            for player in config.players
+        ],
+    }
+
+
+def write_config(
+    config: GameConfig,
+    path: str | Path,
+    *,
+    overwrite: bool = False,
+) -> Path:
+    """Atomically persist a validated configuration as private UTF-8 JSON.
+
+    Configuration files can contain provider headers or legacy inline keys, so
+    newly written files use owner-only permissions.  Replacing the destination
+    only after a complete temporary write also prevents a terminal interruption
+    from leaving behind truncated JSON.
+    """
+    config_path = Path(path)
+    if config_path.exists() and not overwrite:
+        msg = f"Configuration already exists: {config_path}"
+        raise FileExistsError(msg)
+    payload = (
+        json.dumps(
+            config_to_dict(config),
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n"
+    )
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=config_path.parent,
+            prefix=f".{config_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as file:
+            temporary_path = Path(file.name)
+            file.write(payload)
+            file.flush()
+            os.fsync(file.fileno())
+        temporary_path.chmod(0o600)
+        temporary_path.replace(config_path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
     return config_path
 
 

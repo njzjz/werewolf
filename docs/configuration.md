@@ -1,6 +1,29 @@
 # 配置与运行
 
-`werewolf init` 默认生成一份精简推荐配置；确认 provider、模型和玩家后即可运行 `werewolf play`。需要查看或修改全部高级字段时使用 `werewolf init --full`。密钥应通过环境变量读取，不要写入 JSON、日志或记忆文件。
+推荐直接运行 `werewolf`，或用 `werewolf configure my-game.json` 指定路径。配置工作台可以创建或载入已有 JSON，并在一个界面中完成：
+
+- 游戏语言、内置电影牌组、经典人数和自定义身份计数；
+- 真人、LLM、本地机器人数量，以及逐席名称、persona、技能和固定身份；
+- 多个 OpenAI-compatible Provider、模型、接口协议、推理强度、流式传输和 Prompt Caching；
+- 全部房规、终端交互、严格模式、恢复点、公开日志和个人记忆导出；
+- 保存前完整校验，以及“保存并开始游戏”。
+
+真实终端支持方向键、`j`/`k`、Enter 和 Esc；非 TTY 环境自动使用编号输入。TUI 不要求输入真实 API 密钥，只保存环境变量名。`werewolf init` 仍可为脚本生成精简推荐配置，`werewolf init --full` 生成完整参考模板。密钥不要写入 JSON、日志或记忆文件。
+
+## 配置工作台
+
+```bash
+# 默认创建或编辑 werewolf.json
+werewolf configure
+
+# 创建或编辑指定文件；config 和 setup 是等价别名
+werewolf config tournament.json
+
+# 不启用 ANSI 彩色样式
+werewolf setup local.json --no-color
+```
+
+工作台写文件前会先执行与 `werewolf play` 相同的配置校验，再通过临时文件原子替换目标；新文件权限设为 `0600`。载入现有配置时不会丢弃 TUI 暂未展示的 `extra_headers` 等高级值。
 
 ## 推荐配置
 
