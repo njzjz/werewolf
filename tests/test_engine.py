@@ -1160,6 +1160,34 @@ def test_players_receive_global_and_role_specific_skills() -> None:
     )
 
 
+def test_checkpoint_resume_preserves_movie_board_skills(tmp_path) -> None:
+    """Restored players must receive the same preset guidance as fresh players."""
+    roles = [
+        Role.WEREWOLF,
+        *([Role.MADMAN] * 7),
+        Role.SEER,
+        Role.BODYGUARD,
+    ]
+    checkpoint = tmp_path / "private.checkpoint.json"
+    config = replace(
+        fixed_role_config(roles, "movie_mad_land"),
+        checkpoint_path=str(checkpoint),
+    )
+    game = Game(config, terminal=SilentTerminal())
+    game._save_checkpoint(next_day=1, next_step="night")  # noqa: SLF001
+
+    resumed = Game(
+        config,
+        terminal=SilentTerminal(),
+        resume_checkpoint=checkpoint,
+    )
+
+    assert all(
+        "board_movie_mad_land" in {skill.name for skill in player.skills}
+        for player in resumed.players
+    )
+
+
 def test_madman_stays_out_of_wolf_chat_and_wins_with_werewolves() -> None:
     """Madmen appear village-side and share victory, but never wolf secrets."""
     roles = [

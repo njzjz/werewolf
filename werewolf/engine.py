@@ -39,6 +39,7 @@ from .models import (
     PlayerState,
     PlayerView,
     Role,
+    Skill,
     Thought,
     Visibility,
     localized,
@@ -254,11 +255,8 @@ class Game:
                 seat.persona,
                 controllers or {},
             )
-            skills = resolve_player_skills(role, list(seat.skills))
+            skills = self._build_player_skills(role, seat.skills)
             self._controller_kinds[player_id] = seat.controller
-            if config.role_preset != "classic":
-                skills = add_movie_survival_skill(skills)
-            skills = add_preset_skill(skills, config.role_preset)
             self.players.append(
                 PlayerState(
                     player_id=player_id,
@@ -410,15 +408,11 @@ class Game:
             player.role = Role(str(saved["role"]))
             player.alive = bool(saved["alive"])
             player.lover_id = saved.get("lover_id")
-            skills = resolve_player_skills(
+            player.skills = self._build_player_skills(
                 player.role,
-                list(self._seat_configs[index].skills),
+                self._seat_configs[index].skills,
+                lover=player.lover_id is not None,
             )
-            if self.config.role_preset != "classic":
-                skills = add_movie_survival_skill(skills)
-            if player.lover_id:
-                skills = add_lover_skill(skills)
-            player.skills = skills
             player.memory.events = [
                 MemoryEvent(
                     sequence=int(event["sequence"]),
@@ -520,6 +514,20 @@ class Game:
                     f"Checkpoint restored: day {self._resume_day}, next phase {self._resume_step}.",
                 ),
             )
+
+    def _build_player_skills(
+        self,
+        role: Role,
+        configured: tuple[str, ...],
+        *,
+        lover: bool = False,
+    ) -> tuple[Skill, ...]:
+        """Build one player's complete prompt guidance in a stable order."""
+        skills = resolve_player_skills(role, list(configured))
+        if self.config.role_preset != "classic":
+            skills = add_movie_survival_skill(skills)
+        skills = add_preset_skill(skills, self.config.role_preset)
+        return add_lover_skill(skills) if lover else skills
 
     def _clear_checkpoint(self) -> None:
         """Remove a checkpoint after the match reaches a terminal result."""
