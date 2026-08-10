@@ -1667,6 +1667,25 @@ def test_madman_stays_out_of_wolf_chat_and_wins_with_werewolves() -> None:
     assert game._prize_shares(("玩家1",)) == (("玩家1", 1.0),)  # noqa: SLF001
 
 
+def test_dead_madman_does_not_win_in_a_classic_custom_deck() -> None:
+    """The Madman's own survival condition is independent of movie prize mode."""
+    roles = [
+        Role.WEREWOLF,
+        Role.MADMAN,
+        Role.SEER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+    ]
+    game = Game(fixed_role_config(roles), terminal=SilentTerminal())
+    game._by_id["p2"].alive = False  # noqa: SLF001
+    for player_id in ("p3", "p4", "p5"):
+        game._by_id[player_id].alive = False  # noqa: SLF001
+
+    assert game._winner() is Faction.WEREWOLF  # noqa: SLF001
+    assert game._winning_players(Faction.WEREWOLF) == ("玩家1",)  # noqa: SLF001
+
+
 def test_bodyguard_blocks_wolf_attack_and_cannot_protect_self() -> None:
     """The Bodyguard's legal choices exclude themself and protection prevents death."""
     roles = [
@@ -1926,6 +1945,27 @@ def test_lover_dies_of_heartbreak_and_lovers_can_steal_the_endgame() -> None:
     result = win_game._finish(Faction.LOVERS, "test")  # noqa: SLF001
     assert result.winning_players == ("玩家1", "玩家3")
     assert result.prize_shares == (("玩家1", 0.5), ("玩家3", 0.5))
+
+
+def test_dead_cupid_does_not_share_a_classic_lovers_outcome() -> None:
+    """Cupid must survive to join the two living Lovers as a winner."""
+    roles = [
+        Role.WEREWOLF,
+        Role.CUPID,
+        Role.SEER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+    ]
+    game = Game(fixed_role_config(roles), terminal=SilentTerminal())
+    game._by_id["p1"].lover_id = "p3"  # noqa: SLF001
+    game._by_id["p3"].lover_id = "p1"  # noqa: SLF001
+    game._by_id["p2"].alive = False  # noqa: SLF001
+
+    assert game._winning_players(Faction.LOVERS) == (  # noqa: SLF001
+        "玩家1",
+        "玩家3",
+    )
 
 
 def test_shared_players_only_learn_each_other() -> None:

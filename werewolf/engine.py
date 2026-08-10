@@ -2384,13 +2384,22 @@ class Game:
             winners = [
                 player
                 for player in self.players
-                if player.role is Role.CUPID or player.lover_id is not None
+                if player.alive
+                and (player.role is Role.CUPID or player.lover_id is not None)
             ]
         else:
             winners = [
                 player
                 for player in self.players
                 if player.role.faction is winner and player.lover_id is None
+            ]
+            # Madmen share the Werewolf outcome only if they personally
+            # survive, even in a classic custom deck where dead faction
+            # members would otherwise remain eligible.
+            winners = [
+                player
+                for player in winners
+                if player.role is not Role.MADMAN or player.alive
             ]
         if self.config.role_preset != "classic":
             winners = [player for player in winners if player.alive]
