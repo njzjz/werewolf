@@ -1929,17 +1929,23 @@ class Game:
     ) -> str:
         """Keep private actors and abilities out of resumable terminal errors."""
         public_kinds = {ActionKind.SPEAK, ActionKind.LAST_WORDS, ActionKind.VOTE}
+        safe_detail = self._safe_error_summary(detail)
         if request.kind in public_kinds:
             return (
                 f"Controller failed for {self._player_label(player)} during "
-                f"{request.kind.value}: {detail}"
+                f"{request.kind.value}: {safe_detail}"
             )
-        category = (
-            "invalid response"
-            if detail.lower().startswith(("illegal choice", "empty text"))
-            else detail.split(":", maxsplit=1)[0]
-        )
-        return f"Controller failed during a private action ({category}); private details were not printed."
+        return f"Controller failed during a private action ({safe_detail}); private details were not printed."
+
+    @staticmethod
+    def _safe_error_summary(detail: str) -> str:
+        """Keep only diagnostics explicitly safe for shared output and exports."""
+        if detail.lower().startswith(("illegal choice", "empty text")):
+            return "invalid response"
+        category, separator, message = detail.partition(":")
+        if category in {"ProviderHTTPError", "ProviderProtocolError"} and separator:
+            return message.strip()
+        return category.strip() or "controller error"
 
     @staticmethod
     def _short_error(detail: str, limit: int = 500) -> str:
@@ -1957,12 +1963,13 @@ class Game:
         """Apply a conservative, visible fallback only in explicitly casual games."""
         if self._controller_kinds.get(player.player_id) == "llm":
             self._increment_metric("fallbacks")
+        safe_error = self._safe_error_summary(error)
         record = FallbackRecord(
             day=self.day,
             phase=self.phase,
             player_name=self._player_label(player),
             action_kind=request.kind.value,
-            error=error,
+            error=safe_error,
         )
         with self._state_lock:
             self._fallback_records.append(record)
@@ -1971,7 +1978,7 @@ class Game:
         return replace(
             fallback,
             used_fallback=True,
-            fallback_error=error,
+            fallback_error=safe_error,
             attempts=attempts,
         )
 

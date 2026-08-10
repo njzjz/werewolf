@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
+import urllib.error
 from dataclasses import replace
+from email.message import Message
 from typing import Any
 
 import pytest
@@ -12,6 +15,7 @@ from werewolf.agents import (
     HumanController,
     LLMController,
     OpenAICompatibleClient,
+    ProviderHTTPError,
     SafeFallbackController,
     Terminal,
 )
@@ -548,6 +552,32 @@ def test_empty_chat_answer_names_the_output_limit_as_its_cause() -> None:
 
     with pytest.raises(RuntimeError, match="finish_reason=length"):
         client.complete([{"role": "user", "content": "行动"}])
+
+
+def test_provider_http_error_exposes_only_safe_structured_metadata() -> None:
+    """An echoed private request body must never enter a printable exception."""
+    headers = Message()
+    headers["x-request-id"] = "req-safe_123"
+    body = io.BytesIO(
+        b'{"error":{"code":"bad_request","param":"messages",'
+        b'"message":"ULTRA_PRIVATE_WOLF_CHAT"}}',
+    )
+    raw = urllib.error.HTTPError(
+        "https://example.invalid/v1/chat/completions",
+        400,
+        "bad request",
+        headers,
+        body,
+    )
+
+    error = OpenAICompatibleClient._http_error(raw)  # noqa: SLF001
+
+    assert isinstance(error, ProviderHTTPError)
+    assert error.status_code == 400
+    assert error.error_code == "bad_request"
+    assert error.request_id == "req-safe_123"
+    assert "ULTRA_PRIVATE_WOLF_CHAT" not in str(error)
+    assert "messages" not in str(error)
 
 
 def test_chat_stream_requests_usage_and_retries_without_it_when_rejected() -> None:

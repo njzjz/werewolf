@@ -80,6 +80,43 @@ AFFIRMATIVE_ANSWERS = frozenset(
 )
 
 
+def _safe_diagnostic_token(value: object, *, limit: int = 128) -> str | None:
+    """Return a bounded identifier safe for public logs, or ``None``."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped or len(stripped) > limit:
+        return None
+    return stripped if re.fullmatch(r"[A-Za-z0-9._:/-]+", stripped) else None
+
+
+class ProviderHTTPError(RuntimeError):
+    """Structured, publicly safe HTTP failure from a model provider."""
+
+    def __init__(
+        self,
+        status_code: int,
+        *,
+        error_code: str | None = None,
+        request_id: str | None = None,
+        unsupported_field: str | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.error_code = error_code
+        self.request_id = request_id
+        self.unsupported_field = unsupported_field
+        details = [f"HTTP {status_code}"]
+        if error_code:
+            details.append(f"code={error_code}")
+        if request_id:
+            details.append(f"request_id={request_id}")
+        super().__init__(f"LLM API request failed ({', '.join(details)})")
+
+
+class ProviderProtocolError(RuntimeError):
+    """Safe category for malformed or failed provider protocol messages."""
+
+
 def _create_ipv4_connection(
     address: tuple[str, int],
     timeout: float | None = None,
@@ -625,15 +662,15 @@ class OpenAICompatibleClient:
             choice = response["choices"][0]
             message = choice["message"]
         except (KeyError, IndexError, TypeError) as exc:
-            msg = f"Malformed chat-completions response: {response!r}"
-            raise RuntimeError(msg) from exc
+            msg = "Malformed chat-completions response"
+            raise ProviderProtocolError(msg) from exc
         content = cls._content_text(message.get("content"))
         if content:
             return content
         reasoning_content = cls._content_text(message.get("reasoning_content"))
         if reasoning_content:
             return reasoning_content
-        raise RuntimeError(cls._empty_content_error(choice.get("finish_reason")))
+        raise ProviderProtocolError(cls._empty_content_error(choice.get("finish_reason")))
 
     @staticmethod
     def _empty_content_error(finish_reason: object) -> str:
@@ -648,9 +685,10 @@ class OpenAICompatibleClient:
                 "LLM returned no answer because the provider content filter "
                 "stopped the response (finish_reason=content_filter)."
             )
+        safe_reason = _safe_diagnostic_token(finish_reason) or "unknown"
         return (
             "LLM returned an empty answer with no content or reasoning text "
-            f"(finish_reason={finish_reason!r})."
+            f"(finish_reason={safe_reason})."
         )
 
     @staticmethod
@@ -787,8 +825,49 @@ class OpenAICompatibleClient:
             )
         if parts:
             return "".join(parts)
-        msg = f"Malformed Responses API response: {response!r}"
-        raise RuntimeError(msg)
+        msg = "Malformed Responses API response"
+        raise ProviderProtocolError(msg)
+
+    @staticmethod
+    def _http_error(exc: urllib.error.HTTPError) -> ProviderHTTPError:
+        """Extract only structured, bounded metadata from a provider error."""
+        body = exc.read(65536).decode(errors="replace")
+        parsed: object = None
+        with suppress(json.JSONDecodeError):
+            parsed = json.loads(body)
+        error = parsed.get("error", parsed) if isinstance(parsed, dict) else None
+        error_code: str | None = None
+        parameter: str | None = None
+        message = ""
+        if isinstance(error, dict):
+            error_code = _safe_diagnostic_token(error.get("code"))
+            parameter = _safe_diagnostic_token(
+                error.get("param", error.get("parameter")),
+            )
+            raw_message = error.get("message")
+            message = raw_message.lower() if isinstance(raw_message, str) else ""
+        request_id = None
+        for header in ("x-request-id", "request-id", "x-amzn-requestid"):
+            request_id = _safe_diagnostic_token(exc.headers.get(header))
+            if request_id:
+                break
+        unsupported_field = None
+        if 400 <= exc.code < 500 and parameter:
+            unsupported_markers = (
+                "unsupported",
+                "unknown parameter",
+                "unknown field",
+                "unrecognized",
+                "not permitted",
+            )
+            if any(marker in message for marker in unsupported_markers):
+                unsupported_field = parameter
+        return ProviderHTTPError(
+            exc.code,
+            error_code=error_code,
+            request_id=request_id,
+            unsupported_field=unsupported_field,
+        )
 
     def _request(self, payload: dict[str, Any]) -> urllib.request.Request:
         """Build one authenticated request without exposing its credentials."""
@@ -829,12 +908,10 @@ class OpenAICompatibleClient:
             ) as response:
                 return json.loads(response.read().decode())
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode(errors="replace")[:1000]
-            msg = f"LLM API returned HTTP {exc.code}: {detail}"
-            raise RuntimeError(msg) from exc
+            raise self._http_error(exc) from exc
         except urllib.error.URLError as exc:
-            msg = f"Could not reach LLM API: {exc.reason}"
-            raise RuntimeError(msg) from exc
+            msg = "Could not reach LLM API"
+            raise ProviderProtocolError(msg) from exc
 
     def _post_stream(self, payload: dict[str, Any]) -> str:
         """Consume an SSE response incrementally and return assembled model text."""
@@ -863,12 +940,10 @@ class OpenAICompatibleClient:
             ) as response:
                 return self._stream_content(response)
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode(errors="replace")[:1000]
-            msg = f"LLM API returned HTTP {exc.code}: {detail}"
-            raise RuntimeError(msg) from exc
+            raise self._http_error(exc) from exc
         except urllib.error.URLError as exc:
-            msg = f"Could not reach LLM API: {exc.reason}"
-            raise RuntimeError(msg) from exc
+            msg = "Could not reach LLM API"
+            raise ProviderProtocolError(msg) from exc
 
     def _stream_content(self, lines: Iterable[bytes]) -> str:
         """Extract assistant text deltas from Responses or Chat SSE events."""
@@ -887,15 +962,21 @@ class OpenAICompatibleClient:
             try:
                 event = json.loads(data_text)
             except json.JSONDecodeError as exc:
-                msg = f"Malformed streaming event: {data_text[:500]}"
-                raise RuntimeError(msg) from exc
+                msg = "Malformed streaming event"
+                raise ProviderProtocolError(msg) from exc
             event_type = event.get("type")
             if isinstance(event.get("usage"), dict):
                 stream_usage = event["usage"]
             if event_type in {"error", "response.failed"}:
                 error = event.get("error") or event.get("response", {}).get("error")
-                msg = f"LLM streaming API failed: {error or event!r}"
-                raise RuntimeError(msg)
+                error_code = (
+                    _safe_diagnostic_token(error.get("code"))
+                    if isinstance(error, dict)
+                    else None
+                )
+                suffix = f" (code={error_code})" if error_code else ""
+                msg = f"LLM streaming API reported an error{suffix}"
+                raise ProviderProtocolError(msg)
             if event_type == "response.output_text.delta":
                 delta = event.get("delta")
                 if isinstance(delta, str):
@@ -939,7 +1020,7 @@ class OpenAICompatibleClient:
             return "".join(reasoning_parts)
         if completed_response is not None:
             return self._responses_content(completed_response)
-        raise RuntimeError(self._empty_content_error(finish_reason))
+        raise ProviderProtocolError(self._empty_content_error(finish_reason))
 
 
 class LLMController:

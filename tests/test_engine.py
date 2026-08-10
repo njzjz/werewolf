@@ -534,11 +534,12 @@ def test_strict_controllers_never_fall_back_to_local_bot() -> None:
         controllers={"p1": FailingController()},
         terminal=SilentTerminal(),
     )
-    with pytest.raises(RuntimeError, match="simulated provider outage"):
+    with pytest.raises(RuntimeError, match="RuntimeError") as captured:
         failing_game._act(  # noqa: SLF001
             failing_game._by_id["p1"],  # noqa: SLF001
             ActionRequest(ActionKind.SPEAK, "发言"),
         )
+    assert "simulated provider outage" not in str(captured.value)
 
     illegal = ScriptedController(
         {ActionKind.VOTE: [AgentResponse(choice="not-a-player")]},
@@ -548,7 +549,7 @@ def test_strict_controllers_never_fall_back_to_local_bot() -> None:
         controllers={"p1": illegal},
         terminal=SilentTerminal(),
     )
-    with pytest.raises(RuntimeError, match="illegal choice"):
+    with pytest.raises(RuntimeError, match="invalid response"):
         illegal_game._act(  # noqa: SLF001
             illegal_game._by_id["p1"],  # noqa: SLF001
             ActionRequest(
@@ -823,8 +824,8 @@ def test_silent_model_statement_is_retried_but_people_may_still_pass() -> None:
     assert local._act(local._by_id["p1"], speak).text == ""  # noqa: SLF001
 
 
-def test_strict_mode_reports_a_silent_model_without_naming_the_action() -> None:
-    """An exhausted retry budget must still name the cause for the operator."""
+def test_strict_mode_reports_a_silent_model_as_an_invalid_response() -> None:
+    """An exhausted retry budget should expose a safe validation category."""
     game = Game(
         llm_seat_config(controller_retries=0, strict_controllers=True),
         controllers={"p1": RecordingController([AgentResponse(text="")])},
@@ -832,7 +833,7 @@ def test_strict_mode_reports_a_silent_model_without_naming_the_action() -> None:
     )
     game.phase = "discussion"
 
-    with pytest.raises(RuntimeError, match="empty text for speak"):
+    with pytest.raises(RuntimeError, match="invalid response"):
         game._act(  # noqa: SLF001
             game._by_id["p1"],  # noqa: SLF001
             ActionRequest(ActionKind.SPEAK, "发言", requires_text=True),
