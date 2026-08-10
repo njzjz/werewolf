@@ -30,6 +30,7 @@ from werewolf.models import (
     MemoryEvent,
     PlayerView,
     Role,
+    Thought,
     Visibility,
 )
 
@@ -376,11 +377,107 @@ def test_llm_places_append_only_history_before_dynamic_action() -> None:
         ),
     )
 
-    assert first[:2] == second[:2]
+    assert first[:-1] == second[:-1]
     assert "稳定的公开历史" in first[1]["content"]
-    assert "当前：" not in first[1]["content"]
-    assert "当前：" in first[2]["content"]
-    assert first[2] != second[2]
+    assert "当前法官请求" not in first[1]["content"]
+    assert "当前法官请求" in first[-1]["content"]
+    assert first[-1] != second[-1]
+
+
+def test_llm_shares_public_prefix_before_isolating_private_context() -> None:
+    """Players should reuse public prompt tokens without mixing their secrets."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(
+            base_url="https://example.invalid/v1",
+            model="test",
+            wire_api="responses",
+            prompt_cache=True,
+        ),
+    )
+    public_event = MemoryEvent(
+        sequence=1,
+        day=1,
+        phase="discussion",
+        text="法官宣布昨夜平安夜",
+        visibility=Visibility.PUBLIC,
+    )
+    first_view = replace(
+        seat_view(),
+        events=(
+            public_event,
+            MemoryEvent(
+                sequence=2,
+                day=1,
+                phase="night",
+                text="一号的私密查验",
+                visibility=Visibility.PRIVATE,
+            ),
+        ),
+        thoughts=(Thought(day=1, phase="night", text="一号的私密计划"),),
+    )
+    second_view = replace(
+        seat_view(),
+        player_id="p3",
+        name="智能体3",
+        role=Role.WEREWOLF,
+        role_name="狼人",
+        role_description="夜间参与狼聊",
+        faction=Faction.WEREWOLF,
+        seat_number=3,
+        events=(
+            public_event,
+            MemoryEvent(
+                sequence=3,
+                day=1,
+                phase="night",
+                text="三号的私密狼聊",
+                visibility=Visibility.WEREWOLF,
+            ),
+        ),
+        thoughts=(Thought(day=1, phase="night", text="三号的私密计划"),),
+    )
+
+    first = LLMController(client)._messages(  # noqa: SLF001
+        first_view,
+        ActionRequest(ActionKind.SPEAK, "请发言"),
+    )
+    second = LLMController(client)._messages(  # noqa: SLF001
+        second_view,
+        ActionRequest(ActionKind.SPEAK, "请发言"),
+    )
+
+    assert first[:3] == second[:3]
+    assert "法官宣布昨夜平安夜" in first[1]["content"]
+    assert "一号的私密查验" not in str(first[:3])
+    assert "三号的私密狼聊" not in str(second[:3])
+    assert "一号的私密查验" in first[4]["content"]
+    assert "一号的私密计划" in first[5]["content"]
+    assert "三号的私密狼聊" in second[4]["content"]
+    assert "三号的私密计划" in second[5]["content"]
+    first_key = client._payload(first)["prompt_cache_key"]  # noqa: SLF001
+    second_key = client._payload(second)["prompt_cache_key"]  # noqa: SLF001
+    later_public_view = replace(
+        first_view,
+        events=(
+            public_event,
+            MemoryEvent(
+                sequence=4,
+                day=1,
+                phase="discussion",
+                text="新增公开发言",
+                visibility=Visibility.PUBLIC,
+            ),
+            first_view.events[1],
+        ),
+    )
+    later_key = client._payload(  # noqa: SLF001
+        LLMController(client)._messages(  # noqa: SLF001
+            later_public_view,
+            ActionRequest(ActionKind.VOTE, "请投票"),
+        ),
+    )["prompt_cache_key"]
+    assert first_key != second_key
+    assert first_key == later_key
 
 
 def test_llm_receives_seat_map_and_public_parity_constraint() -> None:
@@ -419,11 +516,11 @@ def test_llm_receives_seat_map_and_public_parity_constraint() -> None:
         view,
         ActionRequest(ActionKind.SPEAK, "请发言"),
     )
-    current = messages[-1]["content"]
+    public_state = messages[2]["content"]
 
-    assert '"seat": 8' in current
-    assert '"alive": false' in current
-    assert "至多1名存活狼人" in current
+    assert '"seat": 8' in public_state
+    assert '"alive": false' in public_state
+    assert "至多1名存活狼人" in public_state
 
 
 def seat_view(language: str = "zh-CN") -> PlayerView:
@@ -461,7 +558,8 @@ def test_llm_prompt_states_the_public_seat_the_player_must_claim() -> None:
         ActionRequest(ActionKind.SPEAK, "请发言", requires_text=True),
     )
 
-    assert "公开称呼：1号 智能体5" in messages[0]["content"]
+    assert '"public_label": "1号 智能体5"' in messages[3]["content"]
+    assert '"role": "平民"' not in str(messages[:3])
     assert "名字恰好是“你”" in messages[0]["content"]
     assert "不得用后来出现的白天发言" in messages[0]["content"]
     assert "不得逐句复述" in messages[0]["content"]
@@ -819,6 +917,23 @@ def test_history_trimming_advances_in_cache_friendly_chunks() -> None:
 
     assert second.startswith(first)
     assert len(second) <= controller.context_char_limit
+
+
+def test_history_sections_share_one_total_context_budget() -> None:
+    """Separating cache lanes must not multiply the configured context limit."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+    )
+    controller = LLMController(client, context_char_limit=2000)
+
+    sections = controller._trim_history_sections(  # noqa: SLF001
+        "公开" * 1000,
+        "私密" * 1000,
+        "策略" * 1000,
+    )
+
+    assert sum(map(len, sections)) <= controller.context_char_limit
+    assert all(section.startswith("[较早内容因上下文长度省略]") for section in sections)
 
 
 def test_terminal_persists_only_explicit_public_output(tmp_path) -> None:
