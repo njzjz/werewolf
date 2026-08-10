@@ -58,9 +58,9 @@ _PRESET_LABELS = {
 
 _PRESET_DESCRIPTIONS = {
     "classic": "6–16 人，按人数自动生成平衡牌组",
-    "killer": "8 人：2 杀手、2 警察、4 平民，夜间行凶与查证",
-    "ghost_similar": "8 人：2 幽灵拿相关词，6 水民拿公共词，只走白天",
-    "ghost_blank": "8 人：2 名互认幽灵无词可猜，6 水民拿公共词，只走白天",
+    "killer": "6–16 人，杀手与警察随人数扩展，夜间行凶与查证",
+    "ghost_similar": "6–16 人，幽灵人数随桌型扩展，只走白天",
+    "ghost_blank": "6–16 人，互认幽灵无词可猜，只走白天",
     "movie_basic": "10 人：基础电影牌组",
     "movie_crazy_fox": "12 人：加入灵媒、守卫与妖狐",
     "movie_prison_break": "12 人：加入共有者与狂人",
@@ -608,7 +608,7 @@ class ConfigurationTUI:
                 count = self.ui.select(
                     "游戏与牌组  ·  人数",
                     [
-                        Choice(str(value), f"{value} 人", "经典牌组自动平衡")
+                        Choice(str(value), f"{value} 人", "按所选模式自动生成牌组")
                         for value in range(MIN_PLAYERS, MAX_PLAYERS + 1)
                     ],
                     default=str(old_count),

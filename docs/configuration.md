@@ -82,13 +82,13 @@ werewolf setup local.json --no-color
 
 常用值如下：
 
-| `role_preset`   | 固定配置与流程 |
+| `role_preset`   | 默认牌组与流程 |
 | --------------- | -------------- |
-| `killer`        | 8 人杀人游戏：2 杀手、2 警察、4 平民 |
-| `ghost_similar` | 8 人捉鬼近义词版：2 幽灵拿相关词、6 水民拿公共词 |
-| `ghost_blank`   | 8 人捉鬼无词版：2 名互认幽灵无词可猜、6 水民拿公共词 |
+| `killer`        | 6–16 人杀人游戏；杀手与警察随人数扩展，其余为平民 |
+| `ghost_similar` | 6–16 人捉鬼近义词版；幽灵随人数扩展，其余为水民 |
+| `ghost_blank`   | 6–16 人捉鬼无词版；互认幽灵随人数扩展，其余为水民 |
 
-三个可直接运行的真人加本地 bot 示例位于 `examples/killer.json`、`examples/ghost_similar.json` 和 `examples/ghost_blank.json`。捉鬼模式由 preset 自动跳过夜晚；无词版被投出的幽灵会进入一次必答猜词动作。
+模式和玩家人数可以独立设置。默认牌组在 6–11 人配置 2 名敌对角色，12–15 人配置 3 名，16 人配置 4 名；杀人游戏同时配置同等数量的警察。三个 8 人真人加本地 bot 示例位于 `examples/killer.json`、`examples/ghost_similar.json` 和 `examples/ghost_blank.json`。捉鬼模式由 preset 自动跳过夜晚；无词版被投出的幽灵会进入一次必答猜词动作。
 
 需要自由组合身份牌时，使用 `roles` 计数表；计数总和必须等于玩家人数：
 

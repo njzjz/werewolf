@@ -59,6 +59,7 @@ from .skills import (
     add_lover_skill,
     add_movie_survival_skill,
     add_preset_skill,
+    add_social_board_skill,
     apply_mode_role_skill,
     resolve_player_skills,
 )
@@ -183,7 +184,6 @@ SOCIAL_ROLE_DECKS: dict[str, tuple[Role, ...]] = {
 }
 
 PRESET_ROLE_DECKS: dict[str, tuple[Role, ...]] = {
-    **SOCIAL_ROLE_DECKS,
     **MOVIE_ROLE_DECKS,
 }
 
@@ -223,16 +223,37 @@ GHOST_WORD_PAIRS: dict[str, tuple[tuple[str, str], ...]] = {
 
 
 def role_deck(player_count: int, preset: str = "classic") -> list[Role]:
-    """Return a classic deck or an exact built-in mode composition.
+    """Return a balanced default deck for one mode and player count.
 
     Six-player games omit the Hunter; larger games include all three special
     good roles. This is a compact no-Sheriff rule set suitable for terminal and
-    agent play rather than a tournament-specific ruleset. Named social and
-    movie presets use fixed cast sizes and exact advertised compositions.
+    agent play rather than a tournament-specific ruleset. Social modes scale
+    their teams independently from the selected table size, while named movie
+    presets retain their exact cast sizes and advertised compositions.
     """
+    if preset in SOCIAL_ROLE_DECKS:
+        if not 6 <= player_count <= 16:
+            msg = "social role decks support 6 to 16 players"
+            raise ValueError(msg)
+        # Keep at least two adversaries so both Ghost variants preserve their
+        # team dynamics. Larger tables add one adversary per four seats; Killer
+        # mode mirrors that count for Police and fills every other seat with a
+        # Civilian, while Ghost modes fill the remainder with Water Civilians.
+        adversary_count = max(2, player_count // 4)
+        if preset == "killer":
+            civilian_count = player_count - (2 * adversary_count)
+            return [
+                *([Role.WEREWOLF] * adversary_count),
+                *([Role.POLICE] * adversary_count),
+                *([Role.VILLAGER] * civilian_count),
+            ]
+        return [
+            *([Role.WEREWOLF] * adversary_count),
+            *([Role.VILLAGER] * (player_count - adversary_count)),
+        ]
     if preset != "classic":
         try:
-            deck = list(PRESET_ROLE_DECKS[preset])
+            deck = list(MOVIE_ROLE_DECKS[preset])
         except KeyError:
             msg = f"Unknown role preset: {preset}"
             raise ValueError(msg) from None
@@ -703,9 +724,20 @@ class Game:
         skills = apply_mode_role_skill(skills, self.config.role_preset, role)
         if self._is_movie_mode():
             skills = add_movie_survival_skill(skills)
+        if self.config.role_preset in SOCIAL_ROLE_DECKS and (
+            self._resolved_role_counts
+            == Counter(role_deck(len(self.config.players), self.config.role_preset))
+        ):
+            skills = add_social_board_skill(
+                skills,
+                self.config.role_preset,
+                self._resolved_role_counts,
+            )
         preset_deck = PRESET_ROLE_DECKS.get(self.config.role_preset)
-        if preset_deck is not None and self._resolved_role_counts == Counter(
-            preset_deck
+        if (
+            self.config.role_preset not in SOCIAL_ROLE_DECKS
+            and preset_deck is not None
+            and self._resolved_role_counts == Counter(preset_deck)
         ):
             skills = add_preset_skill(skills, self.config.role_preset)
         return add_lover_skill(skills) if lover else skills
@@ -3425,13 +3457,13 @@ class Game:
         elif self._is_ghost_mode():
             ghost_description = (
                 self._t(
-                    "你没有词牌，但知道另一名无词幽灵；根据公开描述猜词并伪装。被投出时可猜一次水民词，猜中立即获胜；没有夜间行动。",
-                    "You have no word but know the other Blank Ghost. Infer the word and blend in; if eliminated, one correct guess wins immediately. There is no night action.",
+                    "你没有词牌，但知道无词幽灵队友；根据公开描述猜词并伪装。被投出时可猜一次水民词，猜中立即获胜；没有夜间行动。",
+                    "You have no word but know your Blank-Ghost teammates. Infer the word and blend in; if eliminated, one correct guess wins immediately. There is no night action.",
                 )
                 if self.config.role_preset == "ghost_blank"
                 else self._t(
-                    "你获得与水民相关但不同的词牌，且不知道另一名幽灵；根据描述差异伪装，没有夜间行动。",
-                    "You receive a related but different word and do not know the other Ghost. Blend in through clue differences; there is no night action.",
+                    "你获得与水民相关但不同的词牌，且不知道其他幽灵；根据描述差异伪装，没有夜间行动。",
+                    "You receive a related but different word and do not know the other Ghosts. Blend in through clue differences; there is no night action.",
                 )
             )
             descriptions.update(
