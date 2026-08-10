@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -121,23 +122,105 @@ class GameConfig:
     parallel_llm_votes: bool = True
 
 
-def _provider_from_dict(raw: dict[str, Any]) -> LLMProviderConfig:
+def _object(value: object, path: str) -> dict[str, Any]:
+    """Require one JSON object and retain its path for actionable errors."""
+    if not isinstance(value, dict):
+        msg = f"{path} must be a JSON object"
+        raise TypeError(msg)
+    return value
+
+
+def _reject_unknown(raw: dict[str, Any], allowed: set[str], path: str) -> None:
+    """Reject misspelled fields instead of silently falling back to defaults."""
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        field_path = f"{path}.{unknown[0]}" if path else unknown[0]
+        msg = f"Unknown configuration field: {field_path}"
+        raise ValueError(msg)
+
+
+def _string(value: object, path: str, *, allow_none: bool = False) -> str | None:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, str):
+        msg = f"{path} must be a string{' or null' if allow_none else ''}"
+        raise TypeError(msg)
+    return value
+
+
+def _boolean(value: object, path: str) -> bool:
+    if not isinstance(value, bool):
+        msg = f"{path} must be a JSON boolean"
+        raise TypeError(msg)
+    return value
+
+
+def _integer(value: object, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"{path} must be an integer"
+        raise TypeError(msg)
+    return value
+
+
+def _number(value: object, path: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        msg = f"{path} must be a finite number"
+        raise TypeError(msg)
+    number = float(value)
+    if not math.isfinite(number):
+        msg = f"{path} must be a finite number"
+        raise ValueError(msg)
+    return number
+
+
+def _required(raw: dict[str, Any], field_name: str, path: str) -> object:
+    if field_name not in raw:
+        msg = f"{path}.{field_name} is required"
+        raise ValueError(msg)
+    return raw[field_name]
+
+
+def _provider_from_dict(raw: object, *, path: str) -> LLMProviderConfig:
+    raw = _object(raw, path)
+    _reject_unknown(raw, set(LLMProviderConfig.__dataclass_fields__), path)
+    extra_headers = _object(raw.get("extra_headers", {}), f"{path}.extra_headers")
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in extra_headers.items()):
+        msg = f"{path}.extra_headers keys and values must be strings"
+        raise TypeError(msg)
     return LLMProviderConfig(
-        base_url=str(raw["base_url"]),
-        model=str(raw["model"]),
-        api_key=raw.get("api_key"),
-        api_key_env=raw.get("api_key_env"),
-        temperature=float(raw.get("temperature", 0.7)),
-        timeout=float(raw.get("timeout", 120.0)),
-        max_tokens=int(raw.get("max_tokens", 2000)),
-        use_json_mode=bool(raw.get("use_json_mode", True)),
-        wire_api=str(raw.get("wire_api", "chat")),
-        reasoning_effort=raw.get("reasoning_effort"),
-        force_ipv4=bool(raw.get("force_ipv4", False)),
-        stream=bool(raw.get("stream", True)),
-        prompt_cache=bool(raw.get("prompt_cache", False)),
-        prompt_cache_retention=raw.get("prompt_cache_retention"),
-        extra_headers={str(k): str(v) for k, v in raw.get("extra_headers", {}).items()},
+        base_url=_string(_required(raw, "base_url", path), f"{path}.base_url") or "",
+        model=_string(_required(raw, "model", path), f"{path}.model") or "",
+        api_key=_string(raw.get("api_key"), f"{path}.api_key", allow_none=True),
+        api_key_env=_string(
+            raw.get("api_key_env"),
+            f"{path}.api_key_env",
+            allow_none=True,
+        ),
+        temperature=_number(raw.get("temperature", 0.7), f"{path}.temperature"),
+        timeout=_number(raw.get("timeout", 120.0), f"{path}.timeout"),
+        max_tokens=_integer(raw.get("max_tokens", 2000), f"{path}.max_tokens"),
+        use_json_mode=_boolean(
+            raw.get("use_json_mode", True),
+            f"{path}.use_json_mode",
+        ),
+        wire_api=_string(raw.get("wire_api", "chat"), f"{path}.wire_api") or "",
+        reasoning_effort=_string(
+            raw.get("reasoning_effort"),
+            f"{path}.reasoning_effort",
+            allow_none=True,
+        ),
+        force_ipv4=_boolean(raw.get("force_ipv4", False), f"{path}.force_ipv4"),
+        stream=_boolean(raw.get("stream", True), f"{path}.stream"),
+        prompt_cache=_boolean(
+            raw.get("prompt_cache", False),
+            f"{path}.prompt_cache",
+        ),
+        prompt_cache_retention=_string(
+            raw.get("prompt_cache_retention"),
+            f"{path}.prompt_cache_retention",
+            allow_none=True,
+        ),
+        extra_headers=dict(extra_headers),
     )
 
 
@@ -145,18 +228,31 @@ def _player_from_dict(
     raw: dict[str, Any],
     *,
     default_provider: str | None,
+    path: str,
 ) -> PlayerConfig:
+    _reject_unknown(raw, set(PlayerConfig.__dataclass_fields__), path)
     fixed_role = raw.get("fixed_role")
-    controller = str(raw.get("controller", "llm")).lower()
-    provider = raw.get("provider")
+    if fixed_role is not None and not isinstance(fixed_role, str):
+        msg = f"{path}.fixed_role must be a role string or null"
+        raise TypeError(msg)
+    controller_value = _string(
+        raw.get("controller", "llm"),
+        f"{path}.controller",
+    )
+    controller = (controller_value or "").lower()
+    provider = _string(raw.get("provider"), f"{path}.provider", allow_none=True)
     if controller == "llm" and provider is None:
         provider = default_provider
+    skills = raw.get("skills", ["logic", "memory"])
+    if not isinstance(skills, list) or not all(isinstance(value, str) for value in skills):
+        msg = f"{path}.skills must be an array of strings"
+        raise TypeError(msg)
     return PlayerConfig(
-        name=str(raw["name"]).strip(),
+        name=(_string(_required(raw, "name", path), f"{path}.name") or "").strip(),
         controller=controller,
         provider=provider,
-        persona=str(raw.get("persona", "")),
-        skills=tuple(str(value) for value in raw.get("skills", ["logic", "memory"])),
+        persona=_string(raw.get("persona", ""), f"{path}.persona") or "",
+        skills=tuple(skills),
         fixed_role=Role(fixed_role) if fixed_role else None,
     )
 
@@ -165,14 +261,32 @@ def _player_from_value(
     raw: object,
     *,
     default_provider: str | None,
+    path: str,
 ) -> PlayerConfig:
     """Expand a player name shorthand or parse a full player object."""
     if isinstance(raw, str):
         raw = {"name": raw}
     if not isinstance(raw, dict):
-        msg = "Each player must be a name string or a JSON object"
+        msg = f"{path} must be a name string or a JSON object"
         raise TypeError(msg)
-    return _player_from_dict(raw, default_provider=default_provider)
+    return _player_from_dict(raw, default_provider=default_provider, path=path)
+
+
+def _rules_from_value(raw: object) -> RuleConfig:
+    path = "rules"
+    values = _object(raw, path)
+    _reject_unknown(values, set(RuleConfig.__dataclass_fields__), path)
+    defaults = RuleConfig()
+    parsed: dict[str, object] = {}
+    for field_name in RuleConfig.__dataclass_fields__:
+        value = values.get(field_name, getattr(defaults, field_name))
+        field_path = f"{path}.{field_name}"
+        parsed[field_name] = (
+            _integer(value, field_path)
+            if field_name in {"max_days", "wolf_chat_rounds"}
+            else _boolean(value, field_path)
+        )
+    return RuleConfig(**parsed)
 
 
 def _roles_from_value(raw: object) -> tuple[Role, ...] | None:
@@ -180,7 +294,10 @@ def _roles_from_value(raw: object) -> tuple[Role, ...] | None:
     if raw is None:
         return None
     if isinstance(raw, list):
-        return tuple(Role(str(value)) for value in raw)
+        if not all(isinstance(value, str) for value in raw):
+            msg = "roles list values must be role-name strings"
+            raise TypeError(msg)
+        return tuple(Role(value) for value in raw)
     if not isinstance(raw, dict):
         msg = "roles must be an object of role counts or a list of role names"
         raise TypeError(msg)
@@ -214,41 +331,86 @@ def load_config(path: str | Path) -> GameConfig:
     config_path = Path(path)
     with config_path.open(encoding="utf-8") as file:
         raw = json.load(file)
+    raw = _object(raw, "config")
+    _reject_unknown(raw, set(GameConfig.__dataclass_fields__), "")
+    providers_raw = _object(raw.get("providers", {}), "providers")
     providers = {
-        str(name): _provider_from_dict(value)
-        for name, value in raw.get("providers", {}).items()
+        name: _provider_from_dict(value, path=f"providers.{name}")
+        for name, value in providers_raw.items()
     }
     default_provider = _default_provider_name(providers)
-    rules = RuleConfig(**raw.get("rules", {}))
+    rules = _rules_from_value(raw.get("rules", {}))
+    players_raw = raw.get("players")
+    if not isinstance(players_raw, list):
+        msg = "players must be a JSON array"
+        raise TypeError(msg)
     public_transcript_path = raw.get(
         "public_transcript_path",
         RECOMMENDED_PUBLIC_TRANSCRIPT_PATH,
     )
     checkpoint_path = raw.get("checkpoint_path", RECOMMENDED_CHECKPOINT_PATH)
+    seed = raw.get("seed")
+    if seed is not None:
+        seed = _integer(seed, "seed")
     config = GameConfig(
-        language=str(raw.get("language", "zh-CN")),
+        language=_string(raw.get("language", "zh-CN"), "language") or "",
         players=tuple(
-            _player_from_value(player, default_provider=default_provider)
-            for player in raw["players"]
+            _player_from_value(
+                player,
+                default_provider=default_provider,
+                path=f"players[{index}]",
+            )
+            for index, player in enumerate(players_raw)
         ),
         providers=providers,
         rules=rules,
-        seed=raw.get("seed"),
-        clear_screen=bool(raw.get("clear_screen", True)),
-        memory_directory=raw.get("memory_directory", "game_memories"),
-        context_char_limit=int(raw.get("context_char_limit", 24000)),
-        role_preset=str(raw.get("role_preset", "classic")),
-        roles=_roles_from_value(raw.get("roles")),
-        spectator_progress=bool(raw.get("spectator_progress", True)),
-        strict_controllers=bool(raw.get("strict_controllers", True)),
-        controller_retries=int(raw.get("controller_retries", 2)),
-        public_transcript_path=(
-            str(public_transcript_path) if public_transcript_path is not None else None
+        seed=seed,
+        clear_screen=_boolean(raw.get("clear_screen", True), "clear_screen"),
+        memory_directory=_string(
+            raw.get("memory_directory", "game_memories"),
+            "memory_directory",
+            allow_none=True,
         ),
-        checkpoint_path=(str(checkpoint_path) if checkpoint_path is not None else None),
-        human_strategy_notes=bool(raw.get("human_strategy_notes", False)),
-        confirm_critical_actions=bool(raw.get("confirm_critical_actions", True)),
-        parallel_llm_votes=bool(raw.get("parallel_llm_votes", True)),
+        context_char_limit=_integer(
+            raw.get("context_char_limit", 24000),
+            "context_char_limit",
+        ),
+        role_preset=_string(raw.get("role_preset", "classic"), "role_preset") or "",
+        roles=_roles_from_value(raw.get("roles")),
+        spectator_progress=_boolean(
+            raw.get("spectator_progress", True),
+            "spectator_progress",
+        ),
+        strict_controllers=_boolean(
+            raw.get("strict_controllers", True),
+            "strict_controllers",
+        ),
+        controller_retries=_integer(
+            raw.get("controller_retries", 2),
+            "controller_retries",
+        ),
+        public_transcript_path=_string(
+            public_transcript_path,
+            "public_transcript_path",
+            allow_none=True,
+        ),
+        checkpoint_path=_string(
+            checkpoint_path,
+            "checkpoint_path",
+            allow_none=True,
+        ),
+        human_strategy_notes=_boolean(
+            raw.get("human_strategy_notes", False),
+            "human_strategy_notes",
+        ),
+        confirm_critical_actions=_boolean(
+            raw.get("confirm_critical_actions", True),
+            "confirm_critical_actions",
+        ),
+        parallel_llm_votes=_boolean(
+            raw.get("parallel_llm_votes", True),
+            "parallel_llm_votes",
+        ),
     )
     validate_config(config)
     return config
@@ -256,6 +418,7 @@ def load_config(path: str | Path) -> GameConfig:
 
 def validate_config(config: GameConfig) -> None:
     """Fail early on unsafe or ambiguous game configurations."""
+    _validate_runtime_schema(config)
     if config.language not in SUPPORTED_LANGUAGES:
         msg = f"Unsupported language {config.language!r}; choose one of {sorted(SUPPORTED_LANGUAGES)}"
         raise ValueError(msg)
@@ -355,9 +518,113 @@ def validate_config(config: GameConfig) -> None:
                 "prompt_cache"
             )
             raise ValueError(msg)
+        if not provider.base_url or not provider.model:
+            msg = f"Provider {name!r} requires non-empty base_url and model"
+            raise ValueError(msg)
+        if provider.temperature < 0:
+            msg = f"Provider {name!r} temperature cannot be negative"
+            raise ValueError(msg)
+        if provider.timeout <= 0 or provider.max_tokens <= 0:
+            msg = f"Provider {name!r} timeout and max_tokens must be positive"
+            raise ValueError(msg)
     if config.rules.max_days < 1 or config.rules.wolf_chat_rounds < 0:
         msg = "max_days must be positive and wolf_chat_rounds cannot be negative"
         raise ValueError(msg)
+
+
+def _validate_runtime_schema(config: GameConfig) -> None:
+    """Apply the JSON schema guarantees to programmatically built configs too."""
+    if not isinstance(config, GameConfig):
+        msg = "config must be a GameConfig"
+        raise TypeError(msg)
+    _string(config.language, "language")
+    _string(config.role_preset, "role_preset")
+    for field_name in (
+        "clear_screen",
+        "spectator_progress",
+        "strict_controllers",
+        "human_strategy_notes",
+        "confirm_critical_actions",
+        "parallel_llm_votes",
+    ):
+        _boolean(getattr(config, field_name), field_name)
+    _integer(config.context_char_limit, "context_char_limit")
+    _integer(config.controller_retries, "controller_retries")
+    if config.seed is not None:
+        _integer(config.seed, "seed")
+    for field_name in (
+        "memory_directory",
+        "public_transcript_path",
+        "checkpoint_path",
+    ):
+        _string(getattr(config, field_name), field_name, allow_none=True)
+    if not isinstance(config.players, tuple) or not all(
+        isinstance(player, PlayerConfig) for player in config.players
+    ):
+        msg = "players must be a tuple of PlayerConfig values"
+        raise TypeError(msg)
+    if not isinstance(config.providers, dict) or not all(
+        isinstance(name, str) and isinstance(provider, LLMProviderConfig)
+        for name, provider in config.providers.items()
+    ):
+        msg = "providers must map strings to LLMProviderConfig values"
+        raise TypeError(msg)
+    if not isinstance(config.rules, RuleConfig):
+        msg = "rules must be a RuleConfig"
+        raise TypeError(msg)
+    if config.roles is not None and (
+        not isinstance(config.roles, tuple)
+        or not all(isinstance(role, Role) for role in config.roles)
+    ):
+        msg = "roles must be a tuple of Role values or null"
+        raise TypeError(msg)
+    for index, player in enumerate(config.players):
+        path = f"players[{index}]"
+        _string(player.name, f"{path}.name")
+        _string(player.controller, f"{path}.controller")
+        _string(player.provider, f"{path}.provider", allow_none=True)
+        _string(player.persona, f"{path}.persona")
+        if not isinstance(player.skills, tuple) or not all(
+            isinstance(skill, str) for skill in player.skills
+        ):
+            msg = f"{path}.skills must be a tuple of strings"
+            raise TypeError(msg)
+        if player.fixed_role is not None and not isinstance(player.fixed_role, Role):
+            msg = f"{path}.fixed_role must be a Role or null"
+            raise TypeError(msg)
+    for name, provider in config.providers.items():
+        path = f"providers.{name}"
+        for field_name in ("base_url", "model", "wire_api"):
+            _string(getattr(provider, field_name), f"{path}.{field_name}")
+        for field_name in (
+            "api_key",
+            "api_key_env",
+            "reasoning_effort",
+            "prompt_cache_retention",
+        ):
+            _string(getattr(provider, field_name), f"{path}.{field_name}", allow_none=True)
+        _number(provider.temperature, f"{path}.temperature")
+        _number(provider.timeout, f"{path}.timeout")
+        _integer(provider.max_tokens, f"{path}.max_tokens")
+        for field_name in (
+            "use_json_mode",
+            "force_ipv4",
+            "stream",
+            "prompt_cache",
+        ):
+            _boolean(getattr(provider, field_name), f"{path}.{field_name}")
+        if not isinstance(provider.extra_headers, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in provider.extra_headers.items()
+        ):
+            msg = f"{path}.extra_headers must map strings to strings"
+            raise TypeError(msg)
+    for field_name in RuleConfig.__dataclass_fields__:
+        value = getattr(config.rules, field_name)
+        if field_name in {"max_days", "wolf_chat_rounds"}:
+            _integer(value, f"rules.{field_name}")
+        else:
+            _boolean(value, f"rules.{field_name}")
     if config.context_char_limit < 2000:
         msg = "context_char_limit must be at least 2000"
         raise ValueError(msg)

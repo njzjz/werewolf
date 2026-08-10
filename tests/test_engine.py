@@ -1233,6 +1233,89 @@ def test_custom_role_count_must_match_players(tmp_path: Path) -> None:
         load_config(path)
 
 
+def strict_schema_config() -> dict[str, object]:
+    """Return a minimal JSON-ready table for schema validation tests."""
+    return {
+        "roles": [
+            "werewolf",
+            "werewolf",
+            "seer",
+            "witch",
+            "villager",
+            "villager",
+        ],
+        "providers": {
+            "unused": {
+                "base_url": "https://example.invalid/v1",
+                "model": "test",
+            },
+        },
+        "players": [
+            {"name": f"玩家{index}", "controller": "bot"}
+            for index in range(1, 7)
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("mutate", "path"),
+    [
+        (lambda raw: raw.update(strict_controllers="false"), "strict_controllers"),
+        (
+            lambda raw: raw.update(rules={"allow_self_vote": "false"}),
+            "rules.allow_self_vote",
+        ),
+        (
+            lambda raw: raw["providers"]["unused"].update(stream="false"),
+            "providers.unused.stream",
+        ),
+        (lambda raw: raw.update(controller_retries=False), "controller_retries"),
+    ],
+)
+def test_config_schema_rejects_coerced_boolean_and_integer_values(
+    tmp_path,
+    mutate,
+    path: str,
+) -> None:
+    """String and bool lookalikes must not silently change game behavior."""
+    raw = strict_schema_config()
+    mutate(raw)
+    config_path = tmp_path / "invalid.json"
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(TypeError, match=path):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "path"),
+    [
+        (lambda raw: raw.update(strict_controller=False), "strict_controller"),
+        (
+            lambda raw: raw.update(rules={"allow_self_votes": False}),
+            "rules.allow_self_votes",
+        ),
+        (
+            lambda raw: raw["providers"]["unused"].update(steam=False),
+            "providers.unused.steam",
+        ),
+        (
+            lambda raw: raw["players"][0].update(controler="bot"),
+            r"players\[0\].controler",
+        ),
+    ],
+)
+def test_config_schema_rejects_unknown_fields(tmp_path, mutate, path: str) -> None:
+    """A misspelled safety option must fail at its exact configuration path."""
+    raw = strict_schema_config()
+    mutate(raw)
+    config_path = tmp_path / "invalid.json"
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=path):
+        load_config(config_path)
+
+
 def test_checkpoint_replays_each_completed_controller_call(tmp_path) -> None:
     """Resume should replay journaled responses and roll back partial public output."""
     checkpoint = tmp_path / "private.checkpoint.json"
