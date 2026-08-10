@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from collections import Counter
 from dataclasses import replace
@@ -1708,6 +1709,34 @@ def test_offline_game_completes_and_exports_separate_memories(tmp_path: Path) ->
         "狼人队友名单" not in event["text"] for event in non_wolf_payload["events"]
     )
     assert any(player.memory.thoughts for player in game.players)
+
+
+def test_private_artifacts_use_restrictive_permissions_from_creation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Checkpoint and memory destinations must never rely on a later chmod."""
+    checkpoint = tmp_path / "runs" / "private.json"
+    memory_directory = tmp_path / "memories"
+    memory_directory.mkdir(mode=0o755)
+    config = replace(fixed_config(), checkpoint_path=str(checkpoint))
+    game = Game(config, terminal=SilentTerminal())
+    observed_modes: list[int] = []
+    real_fdopen = os.fdopen
+
+    def checked_fdopen(descriptor, *args, **kwargs):
+        observed_modes.append(os.fstat(descriptor).st_mode & 0o777)
+        return real_fdopen(descriptor, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fdopen", checked_fdopen)
+
+    game._save_checkpoint(next_day=1, next_step="night")  # noqa: SLF001
+    paths = game.export_memories(memory_directory)
+
+    assert observed_modes == [0o600] * (len(paths) + 1)
+    assert checkpoint.stat().st_mode & 0o777 == 0o600
+    assert memory_directory.stat().st_mode & 0o777 == 0o700
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in paths)
 
 
 def test_invalid_role_count_is_rejected() -> None:

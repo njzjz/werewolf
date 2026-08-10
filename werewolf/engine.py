@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
+import tempfile
 import threading
 import time
 from collections import Counter
@@ -369,16 +371,37 @@ class Game:
         if self._checkpoint_path is None:
             return
         self._checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self._checkpoint_path.with_name(
-            f".{self._checkpoint_path.name}.tmp",
-        )
-        temporary.write_text(
+        self._atomic_private_write(
+            self._checkpoint_path,
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
         )
-        temporary.chmod(0o600)
-        temporary.replace(self._checkpoint_path)
-        self._checkpoint_path.chmod(0o600)
+
+    @staticmethod
+    def _atomic_private_write(path: Path, text: str) -> None:
+        """Create, flush, and replace a sensitive UTF-8 file with mode 0600."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            text=True,
+        )
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+                file.write(text)
+                file.flush()
+                os.fsync(file.fileno())
+            temporary.replace(path)
+            path.chmod(0o600)
+        except BaseException:
+            # ``fdopen`` owns the descriptor after it succeeds; closing an
+            # already-closed descriptor is harmlessly suppressed here.
+            with suppress(OSError):
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+            raise
 
     def _load_checkpoint(self, path: Path) -> None:
         """Restore a safe phase boundary and its per-action response journal."""
@@ -2434,7 +2457,8 @@ class Game:
     def export_memories(self, directory: str | Path) -> list[Path]:
         """Persist one privacy-filtered transcript per player as UTF-8 JSON."""
         output = Path(directory)
-        output.mkdir(parents=True, exist_ok=True)
+        output.mkdir(mode=0o700, parents=True, exist_ok=True)
+        output.chmod(0o700)
         written: list[Path] = []
         for player in self.players:
             safe_name = (
@@ -2454,9 +2478,9 @@ class Game:
                 "events": [asdict(event) for event in player.memory.events],
                 "thoughts": [asdict(thought) for thought in player.memory.thoughts],
             }
-            path.write_text(
+            self._atomic_private_write(
+                path,
                 json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
             )
             written.append(path)
         return written
