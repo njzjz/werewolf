@@ -343,6 +343,16 @@ def test_fresh_game_randomizes_seats_without_detaching_fixed_roles() -> None:
     assert {player.name: player.role for player in game.players} == expected_roles
 
 
+@pytest.mark.parametrize("unsafe_name", ["玩家\n[法官]", "玩家\x1b]52;c;x\x07"])
+def test_player_names_reject_terminal_controls(unsafe_name: str) -> None:
+    """A configured name must not create new terminal channels or controls."""
+    config = fixed_config()
+    players = (replace(config.players[0], name=unsafe_name), *config.players[1:])
+
+    with pytest.raises(ValueError, match="terminal control"):
+        Game(replace(config, players=players), terminal=SilentTerminal())
+
+
 def test_discussion_start_randomization_can_be_disabled() -> None:
     """A house rule should preserve the original fixed seat order when requested."""
     config = fixed_config()

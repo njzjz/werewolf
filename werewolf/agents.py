@@ -28,6 +28,7 @@ from .models import (
     Visibility,
     seat_label,
 )
+from .rendering import frame_rendered_lines, sanitize_rendered_text
 
 try:
     import readline as _readline
@@ -228,26 +229,27 @@ class Terminal:
 
     def announce(self, text: str) -> None:
         """Print a public judge announcement."""
-        self._emit(f"\n[法官] {text}")
+        self._emit("法官", text, leading_blank=True)
 
     def progress(self, text: str) -> None:
         """Print a persistent spectator event without game secrets."""
-        self._emit(f"[观战] {text}")
+        self._emit("观战", text)
 
     def metric(self, text: str, *, label: str = "统计") -> None:
         """Print an end-of-game technical summary distinct from live progress."""
-        self._emit(f"[{label}] {text}")
+        self._emit(label, text)
 
     def notice(self, text: str, *, label: str = "提示") -> None:
         """Print a persistent preflight warning before private roles are assigned."""
-        self._emit(f"[{label}] {text}")
+        self._emit(label, text)
 
     def transient_progress(self, text: str) -> None:
         """Update one in-place TTY status without appending it to public logs."""
         if not sys.stdout.isatty():
             return
         with self._output_lock:
-            print(f"\r\033[2K[观战] {text}", end="", flush=True)
+            safe_text = sanitize_rendered_text(text).replace("\n", " ")
+            print(f"\r\033[2K[观战] {safe_text}", end="", flush=True)
             self._transient_progress_active = True
 
     def clear_transient_progress(self) -> None:
@@ -266,16 +268,26 @@ class Terminal:
     ) -> None:
         """Print and persist one completed public player statement."""
         marker = f" · {fallback_label}" if fallback_label else ""
-        self._emit(f"[{player_name}{marker}] {text}")
+        self._emit(f"{player_name}{marker}", text)
 
-    def _emit(self, rendered: str) -> None:
+    def _emit(self, label: str, text: str, *, leading_blank: bool = False) -> None:
         """Write a public line to stdout and the optional spectator transcript."""
+        rendered = frame_rendered_lines(label, text)
+        if leading_blank:
+            rendered = "\n" + rendered
         with self._output_lock:
             self._clear_transient_progress_locked()
             print(rendered, flush=True)
             if self.transcript_path is not None:
                 with self.transcript_path.open("a", encoding="utf-8") as file:
                     file.write(rendered + "\n")
+
+    def private(self, label: str, text: object) -> None:
+        """Render authorized private output without writing the public log."""
+        rendered = frame_rendered_lines(label, text)
+        with self._output_lock:
+            self._clear_transient_progress_locked()
+            print(rendered, flush=True)
 
     def _clear_transient_progress_locked(self) -> None:
         """Clear transient output while the caller holds ``_output_lock``."""
@@ -309,14 +321,20 @@ class Terminal:
         seat = f"{view.seat_number}号 " if view.seat_number else ""
         if view.language == "en":
             seat = f"Seat {view.seat_number} " if view.seat_number else ""
-            print(f"=== Private turn: {seat}{view.name} | Role: {view.role_name} ===")
-            print(view.role_description)
+            self.private(
+                "private",
+                f"=== Private turn: {seat}{view.name} | Role: {view.role_name} ===",
+            )
+            self.private("private", view.role_description)
         else:
-            print(f"=== {seat}{view.name} 的私密回合 | 身份：{view.role_name} ===")
-            print(view.role_description)
+            self.private(
+                "私密",
+                f"=== {seat}{view.name} 的私密回合 | 身份：{view.role_name} ===",
+            )
+            self.private("私密", view.role_description)
         if view.lover:
             lover_label = "Lover" if view.language == "en" else "恋人"
-            print(f"{lover_label}: {view.lover[1]}")
+            self.private(lover_label, view.lover[1])
         self._render_state(view)
         recent = self._recent_events(view)
         if recent:
@@ -325,7 +343,7 @@ class Terminal:
                 if view.language == "en"
                 else "最近可见信息"
             )
-            print(f"\n--- {title} ---")
+            self.private("private" if view.language == "en" else "私密", title)
             for event in recent:
                 marker = {
                     Visibility.PUBLIC: "公开",
@@ -335,27 +353,32 @@ class Terminal:
                 }[event.visibility]
                 if view.language == "en":
                     marker = event.visibility.value
-                print(f"[{marker}] {event.text}")
+                self.private(marker, event.text)
         if view.thoughts:
             title = (
                 "Your latest strategy note"
                 if view.language == "en"
                 else "你的最近策略笔记"
             )
-            print(f"\n--- {title} ---\n{view.thoughts[-1].text}")
+            self.private(
+                "private" if view.language == "en" else "私密",
+                f"{title}\n{view.thoughts[-1].text}",
+            )
 
-    @staticmethod
-    def full_history(view: PlayerView) -> None:
+    def full_history(self, view: PlayerView) -> None:
         """Render the complete authorized timeline on explicit human request."""
         title = (
             "Complete authorized history" if view.language == "en" else "完整可见历史"
         )
-        print(f"\n=== {title} ===")
+        self.private("history" if view.language == "en" else "历史", title)
         last_group: tuple[int, str] | None = None
         for event in view.events:
             group = (event.day, event.phase)
             if group != last_group:
-                print(f"\n--- D{event.day} / {event.phase} ---")
+                self.private(
+                    "history" if view.language == "en" else "历史",
+                    f"D{event.day} / {event.phase}",
+                )
                 last_group = group
             marker = (
                 event.visibility.value
@@ -367,7 +390,7 @@ class Terminal:
                     Visibility.LOVERS: "恋人",
                 }[event.visibility]
             )
-            print(f"[{marker}] {event.text}")
+            self.private(marker, event.text)
 
     @staticmethod
     def _recent_events(view: PlayerView) -> tuple[MemoryEvent, ...]:
@@ -394,8 +417,7 @@ class Terminal:
         selected = [*older_important[-5:], *current]
         return tuple(selected[-16:])
 
-    @staticmethod
-    def _render_state(view: PlayerView) -> None:
+    def _render_state(self, view: PlayerView) -> None:
         """Show a compact public-state panel before the authorized timeline."""
         if not view.seat_players:
             return
@@ -411,15 +433,21 @@ class Terminal:
             if player_id not in alive_ids
         ]
         if view.language == "en":
-            print(f"\n--- Public state | Day {view.day} · {view.phase} ---")
-            print(f"Alive ({len(alive)}): {', '.join(alive)}")
-            print(f"Dead ({len(dead)}): {', '.join(dead) if dead else 'none'}")
+            self.private("state", f"Public state | Day {view.day} · {view.phase}")
+            self.private("state", f"Alive ({len(alive)}): {', '.join(alive)}")
+            self.private(
+                "state",
+                f"Dead ({len(dead)}): {', '.join(dead) if dead else 'none'}",
+            )
         else:
-            print(f"\n--- 公共状态 | 第 {view.day} 天 · {view.phase} ---")
-            print(f"存活（{len(alive)}）：{'、'.join(alive)}")
-            print(f"死亡（{len(dead)}）：{'、'.join(dead) if dead else '无'}")
+            self.private("状态", f"公共状态 | 第 {view.day} 天 · {view.phase}")
+            self.private("状态", f"存活（{len(alive)}）：{'、'.join(alive)}")
+            self.private(
+                "状态",
+                f"死亡（{len(dead)}）：{'、'.join(dead) if dead else '无'}",
+            )
         if view.mechanical_context:
-            print(view.mechanical_context)
+            self.private("state" if view.language == "en" else "状态", view.mechanical_context)
 
 
 class HumanController:
@@ -454,8 +482,10 @@ class HumanController:
     def act(self, view: PlayerView, request: ActionRequest) -> AgentResponse:
         """Collect a validated choice and an optional private strategy note."""
         self.terminal.private_turn(view)
-        print(f"\n{request.prompt}")
-        print(
+        label = "action" if view.language == "en" else "操作"
+        self.terminal.private(label, request.prompt)
+        self.terminal.private(
+            label,
             "Type /history to view the complete authorized timeline."
             if view.language == "en"
             else "输入 /history 可查看完整可见历史。",
@@ -494,7 +524,10 @@ class HumanController:
                 if view.language == "en"
                 else "你本次行动的私密结果"
             )
-            print(f"\n--- {title} ---\n{text}")
+            self.terminal.private(
+                "result" if view.language == "en" else "结果",
+                f"{title}\n{text}",
+            )
             if sys.stdout.isatty():
                 prompt = (
                     "Press Enter once you have read it..."
@@ -513,7 +546,8 @@ class HumanController:
                 self.terminal.full_history(view)
                 continue
             if not text and request.requires_text:
-                print(
+                self.terminal.private(
+                    "action" if view.language == "en" else "操作",
                     "This action requires a statement; please enter one."
                     if view.language == "en"
                     else "本轮动作必须发言，请输入内容。",
@@ -557,15 +591,16 @@ class HumanController:
                 if view.language == "en"
                 else "请输入列表中的编号。"
             )
-            print(retry)
+            self.terminal.private("action" if view.language == "en" else "操作", retry)
 
     def _print_options(self, view: PlayerView, request: ActionRequest) -> None:
         """Render choices again after a history lookup or rejected confirmation."""
+        label = "option" if view.language == "en" else "选项"
         for index, option in enumerate(request.options, start=1):
-            print(f"  {index}. {option.label}")
+            self.terminal.private(label, f"{index}. {option.label}")
         abstain_label = self._abstain_label(view, request.kind)
         if request.allow_abstain:
-            print(f"  0. {abstain_label}")
+            self.terminal.private(label, f"0. {abstain_label}")
 
     def _confirm_choice(
         self,

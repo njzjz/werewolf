@@ -45,6 +45,7 @@ from .models import (
     localized,
     seat_label,
 )
+from .rendering import sanitize_rendered_text
 from .skills import (
     add_lover_skill,
     add_movie_survival_skill,
@@ -958,7 +959,7 @@ class Game:
                     phase=self.phase,
                     recipients=recipients,
                     sender=lover.name,
-                    text=f"{self._player_label(lover)}：{response.text.strip()}",
+                    text=self._sender_event_text(lover, response.text.strip()),
                 )
 
     def _bodyguard_turn(self) -> str | None:
@@ -1008,7 +1009,7 @@ class Game:
                         phase=self.phase,
                         recipients=recipients,
                         sender=wolf.name,
-                        text=f"{self._player_label(wolf)}：{response.text.strip()}",
+                        text=self._sender_event_text(wolf, response.text.strip()),
                     )
         candidates = [
             player for player in self._alive() if player.role is not Role.WEREWOLF
@@ -1685,7 +1686,8 @@ class Game:
             self.rng.setstate(
                 (int(rng_state[0]), tuple(rng_state[1]), rng_state[2]),
             )
-        replayed = AgentResponse(
+        replayed = self._sanitize_response(
+            AgentResponse(
             choice=response.get("choice"),
             text=str(response.get("text", "")),
             thought=str(response.get("thought", "")),
@@ -1693,6 +1695,7 @@ class Game:
             used_fallback=bool(response.get("used_fallback", False)),
             fallback_error=str(response.get("fallback_error", "")),
             attempts=int(response.get("attempts", 1)),
+            ),
         )
         side_effects = entry.get("side_effects")
         if isinstance(side_effects, dict):
@@ -1843,7 +1846,9 @@ class Game:
 
             reason = self._rejection_reason(request, response, is_llm=is_llm)
             if not reason:
-                return replace(response, attempts=attempt + 1)
+                return self._sanitize_response(
+                    replace(response, attempts=attempt + 1),
+                )
             last_error = self._short_error(reason)
             feedback = self._retry_feedback(request, reason)
             if is_llm:
@@ -1980,6 +1985,17 @@ class Game:
             used_fallback=True,
             fallback_error=safe_error,
             attempts=attempts,
+        )
+
+    @staticmethod
+    def _sanitize_response(response: AgentResponse) -> AgentResponse:
+        """Bound controller-authored prose before memory or terminal use."""
+        return replace(
+            response,
+            text=sanitize_rendered_text(response.text),
+            thought=sanitize_rendered_text(response.thought),
+            note=sanitize_rendered_text(response.note),
+            fallback_error=sanitize_rendered_text(response.fallback_error, limit=500),
         )
 
     def _increment_metric(self, name: str) -> None:
@@ -2156,7 +2172,11 @@ class Game:
     ) -> None:
         label = self._player_label(player)
         fallback_marker = self._t("【系统安全后备】", "[system safe fallback]")
-        rendered = f"{label}{fallback_marker if fallback else ''}：{text}"
+        safe_text = sanitize_rendered_text(text)
+        sender = f"{label}{fallback_marker if fallback else ''}"
+        rendered = "\n".join(
+            f"{sender}：{line}" for line in safe_text.split("\n")
+        )
         self.boundary.public(
             day=self.day,
             phase=self.phase,
@@ -2165,11 +2185,17 @@ class Game:
         )
         self.terminal.say(
             label,
-            text,
+            safe_text,
             fallback_label=(
                 self._t("系统安全后备", "system safe fallback") if fallback else None
             ),
         )
+
+    def _sender_event_text(self, player: PlayerState, text: str) -> str:
+        """Frame every private-chat line with its authenticated sender label."""
+        label = self._player_label(player)
+        safe_text = sanitize_rendered_text(text)
+        return "\n".join(f"{label}：{line}" for line in safe_text.split("\n"))
 
     def _winner(self) -> Faction | None:
         """Return the winning faction after applying film third-party priority."""

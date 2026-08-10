@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from .models import Role
+from .rendering import (
+    MAX_PLAYER_NAME_BYTES,
+    MAX_PLAYER_NAME_CHARS,
+    contains_terminal_control,
+)
 from .skills import resolve_skills
 
 SUPPORTED_LANGUAGES = {"zh-CN", "en"}
@@ -263,6 +268,19 @@ def validate_config(config: GameConfig) -> None:
     names = [player.name for player in config.players]
     if any(not name for name in names) or len(set(names)) != len(names):
         msg = "Player names must be non-empty and unique"
+        raise ValueError(msg)
+    if any(contains_terminal_control(name) for name in names):
+        msg = "Player names cannot contain terminal control characters or whitespace controls"
+        raise ValueError(msg)
+    if any(
+        len(name) > MAX_PLAYER_NAME_CHARS
+        or len(name.encode("utf-8")) > MAX_PLAYER_NAME_BYTES
+        for name in names
+    ):
+        msg = (
+            f"Player names must be at most {MAX_PLAYER_NAME_CHARS} characters and "
+            f"{MAX_PLAYER_NAME_BYTES} UTF-8 bytes"
+        )
         raise ValueError(msg)
     fixed = [player.fixed_role for player in config.players if player.fixed_role]
     if config.roles is not None:
