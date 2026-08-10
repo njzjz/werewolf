@@ -610,6 +610,44 @@ def test_authenticated_provider_requests_disable_all_redirects() -> None:
     assert redirected is None
 
 
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        (
+            "https://example.test/v1?api-version=2024-10-21",
+            "https://example.test/v1/chat/completions?api-version=2024-10-21",
+        ),
+        (
+            "https://example.test/v1/chat/completions?api-version=2024-10-21",
+            "https://example.test/v1/chat/completions?api-version=2024-10-21",
+        ),
+    ],
+)
+def test_provider_endpoint_preserves_queries_and_complete_paths(
+    base_url: str,
+    expected: str,
+) -> None:
+    """Azure-style query parameters belong after the selected endpoint path."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url=base_url, model="test"),
+    )
+
+    assert client._request({"model": "test"}).full_url == expected  # noqa: SLF001
+
+
+def test_provider_endpoint_rejects_fragments() -> None:
+    """Fragments are client-side identifiers and cannot identify an API endpoint."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(
+            base_url="https://example.test/v1#private-fragment",
+            model="test",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="fragment"):
+        client._request({"model": "test"})  # noqa: SLF001
+
+
 def test_chat_stream_requests_usage_and_retries_without_it_when_rejected() -> None:
     """Chat streams report no usage unless asked, and old services reject asking."""
     client = OpenAICompatibleClient(

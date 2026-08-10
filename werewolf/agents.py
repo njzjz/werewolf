@@ -937,15 +937,7 @@ class OpenAICompatibleClient:
 
     def _request(self, payload: dict[str, Any]) -> urllib.request.Request:
         """Build one authenticated request without exposing its credentials."""
-        endpoint = self.config.base_url.rstrip("/")
-        suffix = (
-            "/responses" if self.config.wire_api == "responses" else "/chat/completions"
-        )
-        if not endpoint.endswith(suffix):
-            endpoint += suffix
-        if urllib.parse.urlparse(endpoint).scheme not in {"http", "https"}:
-            msg = "LLM base_url must use http:// or https://"
-            raise ValueError(msg)
+        endpoint = self._endpoint_url()
         headers = {"Content-Type": "application/json", **self.config.extra_headers}
         api_key = self.config.resolved_api_key()
         if api_key:
@@ -955,6 +947,25 @@ class OpenAICompatibleClient:
             data=json.dumps(payload).encode(),
             headers=headers,
             method="POST",
+        )
+
+    def _endpoint_url(self) -> str:
+        """Append the selected API path without corrupting query parameters."""
+        parsed = urllib.parse.urlsplit(self.config.base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            msg = "LLM base_url must use http:// or https:// and include a host"
+            raise ValueError(msg)
+        if parsed.fragment:
+            msg = "LLM base_url cannot contain a URL fragment"
+            raise ValueError(msg)
+        suffix = (
+            "/responses" if self.config.wire_api == "responses" else "/chat/completions"
+        )
+        path = parsed.path.rstrip("/")
+        if not path.endswith(suffix):
+            path = f"{path}{suffix}"
+        return urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, path, parsed.query, ""),
         )
 
     def _opener(self) -> urllib.request.OpenerDirector:
