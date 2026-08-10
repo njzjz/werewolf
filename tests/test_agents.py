@@ -580,6 +580,35 @@ def test_provider_http_error_exposes_only_safe_structured_metadata() -> None:
     assert "messages" not in str(error)
 
 
+def test_authenticated_provider_requests_disable_all_redirects() -> None:
+    """A redirect must not create a second request carrying private headers."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(
+            base_url="https://example.invalid/v1",
+            model="test",
+            api_key="TOP-SECRET",
+        ),
+    )
+    request = client._request({"model": "test"})  # noqa: SLF001
+    redirect_handler = next(
+        handler
+        for handler in client._opener().handlers  # noqa: SLF001
+        if isinstance(handler, agents_module._NoRedirectHandler)  # noqa: SLF001
+    )
+
+    redirected = redirect_handler.redirect_request(
+        request,
+        None,
+        302,
+        "Found",
+        {},
+        "https://attacker.invalid/collect",
+    )
+
+    assert request.get_header("Authorization") == "Bearer TOP-SECRET"
+    assert redirected is None
+
+
 def test_chat_stream_requests_usage_and_retries_without_it_when_rejected() -> None:
     """Chat streams report no usage unless asked, and old services reject asking."""
     client = OpenAICompatibleClient(

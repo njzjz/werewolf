@@ -184,6 +184,22 @@ class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
         )
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject redirects so authenticated POST headers never cross origins."""
+
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        file_pointer: object,
+        code: int,
+        message: str,
+        headers: object,
+        new_url: str,
+    ) -> None:
+        """Return no follow-up request for every redirect status."""
+        return None
+
+
 class Controller(Protocol):
     """Minimal interface implemented by every kind of player."""
 
@@ -927,11 +943,15 @@ class OpenAICompatibleClient:
         )
 
     def _opener(self) -> urllib.request.OpenerDirector:
-        """Return the configured network opener, optionally forcing IPv4."""
+        """Return a no-redirect opener, optionally forcing IPv4."""
         return (
-            urllib.request.build_opener(_IPv4HTTPHandler(), _IPv4HTTPSHandler())
+            urllib.request.build_opener(
+                _NoRedirectHandler(),
+                _IPv4HTTPHandler(),
+                _IPv4HTTPSHandler(),
+            )
             if self.config.force_ipv4
-            else urllib.request.build_opener()
+            else urllib.request.build_opener(_NoRedirectHandler())
         )
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
