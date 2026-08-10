@@ -620,6 +620,9 @@ class Game:
         if next_step == "setup":
             self.day = 0
             self._setup()
+            winner = self._winner()
+            if winner is not None:
+                return self._finish(winner, "setup_resolution")
             self._record_nonterminal_snapshot("setup")
             next_day = 1
             next_step = "night"

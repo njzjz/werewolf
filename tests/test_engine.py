@@ -435,6 +435,30 @@ def test_setup_keeps_roles_private_and_wolf_roster_team_only() -> None:
     )
 
 
+def test_run_checks_terminal_conditions_immediately_after_setup() -> None:
+    """A terminal custom deck must not execute an extra night after setup."""
+    roles = [
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        Role.FOX,
+        Role.SEER,
+        Role.VILLAGER,
+    ]
+    game = Game(fixed_role_config(roles), terminal=SilentTerminal())
+
+    def unexpected_night() -> None:
+        pytest.fail("a terminal setup state must not enter night 1")
+
+    game._night = unexpected_night  # type: ignore[method-assign]  # noqa: SLF001
+
+    result = game.run()
+
+    assert result.winner is Faction.FOX
+    assert result.reason == "setup_resolution"
+    assert result.days == 0
+
+
 def test_spectator_progress_streams_without_revealing_private_actor() -> None:
     """Progress names public actors but hides identities behind private actions."""
     terminal = CapturingTerminal()
