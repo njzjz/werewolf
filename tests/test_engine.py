@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import werewolf.agents as agents_module
 from werewolf.agents import LLMController, OpenAICompatibleClient, Terminal
 from werewolf.config import (
     GameConfig,
@@ -365,6 +366,36 @@ def test_player_names_reject_terminal_controls(unsafe_name: str) -> None:
 
     with pytest.raises(ValueError, match="terminal control"):
         Game(replace(config, players=players), terminal=SilentTerminal())
+
+
+def two_human_config() -> GameConfig:
+    """Return a fixed table requiring pass-and-play privacy."""
+    config = fixed_config()
+    players = tuple(
+        replace(player, controller="human" if index < 2 else "bot")
+        for index, player in enumerate(config.players)
+    )
+    return replace(config, players=players, clear_screen=True)
+
+
+def test_multiple_humans_fail_closed_without_private_terminal_handoff() -> None:
+    """Disabling clear-screen must not silently expose the next person's role."""
+    config = replace(two_human_config(), clear_screen=False)
+
+    with pytest.raises(ValueError, match="Multiple human players"):
+        Game(config, terminal=Terminal(clear_screen=False))
+
+
+def test_multiple_humans_are_allowed_on_an_interactive_clearing_tty(
+    monkeypatch,
+) -> None:
+    """A real TTY with effective clearing supports private pass-and-play."""
+    monkeypatch.setattr(agents_module.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(agents_module.sys.stdout, "isatty", lambda: True)
+
+    game = Game(two_human_config(), terminal=Terminal(clear_screen=True))
+
+    assert game._human_count == 2  # noqa: SLF001
 
 
 def test_discussion_start_randomization_can_be_disabled() -> None:

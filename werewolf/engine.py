@@ -249,6 +249,12 @@ class Game:
         seats = self._ordered_seats(resume_checkpoint)
         self._seat_configs = tuple(seats)
         self._human_count = sum(seat.controller == "human" for seat in seats)
+        if self._human_count > 1 and not self.terminal.supports_private_handoff():
+            msg = (
+                "Multiple human players require clear_screen=true and an interactive "
+                "stdin/stdout TTY for private pass-and-play handoff."
+            )
+            raise ValueError(msg)
         self._controller_kinds: dict[str, str] = {}
         roles = self._roles(seats)
         self.players: list[PlayerState] = []

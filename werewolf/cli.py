@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     play_parser.add_argument(
         "--no-clear",
         action="store_true",
-        help="不清屏，适合日志与调试",
+        help="不清屏，仅适合单真人日志与调试；多真人模式会拒绝启动",
     )
     play_parser.add_argument(
         "--no-memory",

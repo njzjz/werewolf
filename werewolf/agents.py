@@ -246,7 +246,15 @@ class Terminal:
         if self.clear_screen and sys.stdout.isatty():
             with self._output_lock:
                 self._clear_transient_progress_locked()
-                print("\033[2J\033[H", end="", flush=True)
+                print("\033[2J\033[3J\033[H", end="", flush=True)
+
+    def supports_private_handoff(self) -> bool:
+        """Return whether pass-and-play secrets can be cleared between people."""
+        return (
+            self.clear_screen
+            and sys.stdin.isatty()
+            and sys.stdout.isatty()
+        )
 
     def announce(self, text: str) -> None:
         """Print a public judge announcement."""
