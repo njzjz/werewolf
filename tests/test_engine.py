@@ -344,8 +344,56 @@ def test_social_mode_role_decks_match_the_advertised_compositions(
     preset: str,
     expected: Counter[Role],
 ) -> None:
-    """Each social mode should resolve to its exact fixed eight-player deck."""
+    """The historical eight-player defaults should remain unchanged."""
     assert Counter(role_deck(8, preset)) == expected
+
+
+@pytest.mark.parametrize(
+    ("player_count", "team_size"),
+    [(6, 2), (10, 2), (12, 3), (16, 4)],
+)
+@pytest.mark.parametrize("preset", ["killer", "ghost_similar", "ghost_blank"])
+def test_social_mode_role_decks_scale_independently_from_player_count(
+    preset: str,
+    player_count: int,
+    team_size: int,
+) -> None:
+    """Selecting a social mode must not force the table back to eight seats."""
+    counts = Counter(role_deck(player_count, preset))
+
+    assert sum(counts.values()) == player_count
+    assert counts[Role.WEREWOLF] == team_size
+    if preset == "killer":
+        assert counts[Role.POLICE] == team_size
+        assert counts[Role.VILLAGER] == player_count - (2 * team_size)
+    else:
+        assert counts[Role.POLICE] == 0
+        assert counts[Role.VILLAGER] == player_count - team_size
+
+
+@pytest.mark.parametrize("preset", ["killer", "ghost_similar", "ghost_blank"])
+def test_social_mode_configs_accept_non_eight_player_tables(preset: str) -> None:
+    """Configuration validation and role assignment must honor twelve seats."""
+    config = demo_config(12, seed=7, role_preset=preset)
+    game = Game(config, terminal=SilentTerminal())
+    board_skill_name = f"board_{preset}"
+
+    assert len(config.players) == 12
+    assert Counter(player.role for player in game.players) == Counter(
+        role_deck(12, preset),
+    )
+    assert all(
+        board_skill_name in {skill.name for skill in player.skills}
+        for player in game.players
+    )
+    board_skill = next(
+        skill for skill in game.players[0].skills if skill.name == board_skill_name
+    )
+    if preset == "killer":
+        assert "3 名杀手、3 名警察和 6 名平民" in board_skill.instructions
+    else:
+        assert "9 名水民" in board_skill.instructions
+        assert "3 名幽灵" in board_skill.instructions
 
 
 def test_daily_discussion_uses_a_seeded_circular_starting_seat() -> None:
@@ -983,7 +1031,7 @@ def test_player_views_and_role_skills_are_themed_for_social_modes(
         assert "本局没有夜晚或身份能力" in global_skill.instructions
         assert "刀口" not in global_skill.instructions
         if preset == "ghost_blank":
-            assert "知道另一名无词幽灵" in role_skill.instructions
+            assert "知道无词幽灵队友" in role_skill.instructions
             assert "一次公开猜词机会" in role_skill.instructions
 
 

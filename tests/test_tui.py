@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import stat
+from collections import Counter
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -98,3 +99,40 @@ def test_atomic_config_writer_round_trips_advanced_values_privately(
 
     assert load_config(path) == config
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_tui_selects_social_mode_and_player_count_independently(
+    tmp_path: Path,
+) -> None:
+    """Changing to Killer mode should preserve the separately selected table size."""
+    config_path = tmp_path / "variable-killer.json"
+    write_config(demo_config(16, seed=7), config_path)
+    answers = io.StringIO(
+        "1\n"  # Configure the existing file.
+        "1\n"  # Open game and deck settings.
+        "1\n"  # Keep Simplified Chinese.
+        "3\n"  # Select Killer mode.
+        "5\n"  # Select 10 players from the 6-16 list.
+        "\n"  # Keep seed 7.
+        "6\n"  # Review and save.
+        "2\n",  # Save without starting.
+    )
+
+    result = run_config_tui(
+        config_path,
+        stdin=answers,
+        stdout=io.StringIO(),
+        color=False,
+    )
+
+    assert result is not None
+    config = load_config(config_path)
+    assert config.role_preset == "killer"
+    assert len(config.players) == 10
+    assert Counter(role_deck(10, "killer")) == Counter(
+        {
+            Role.WEREWOLF: 2,
+            Role.POLICE: 2,
+            Role.VILLAGER: 6,
+        },
+    )
