@@ -13,7 +13,13 @@ from pathlib import Path
 import pytest
 
 import werewolf.agents as agents_module
-from werewolf.agents import Controller, LLMController, OpenAICompatibleClient, Terminal
+from werewolf.agents import (
+    Controller,
+    LLMController,
+    OpenAICompatibleClient,
+    ProviderHTTPError,
+    Terminal,
+)
 from werewolf.config import (
     GameConfig,
     LLMProviderConfig,
@@ -53,10 +59,15 @@ class CapturingTerminal(SilentTerminal):
     def __init__(self) -> None:
         super().__init__()
         self.progress_events: list[str] = []
+        self.transient_progress_events: list[str] = []
 
     def progress(self, text: str) -> None:
         """Record progress without writing test output."""
         self.progress_events.append(text)
+
+    def transient_progress(self, text: str) -> None:
+        """Record ephemeral progress separately from durable spectator events."""
+        self.transient_progress_events.append(text)
 
 
 class ScriptedController:
@@ -533,10 +544,10 @@ def test_spectator_progress_streams_without_revealing_private_actor() -> None:
         ActionRequest(ActionKind.TEAM_CHAT, "狼聊"),
     )
 
-    assert terminal.progress_events[0] == "1号 玩家1 正在组织公开发言……"
-    assert terminal.progress_events[1] == "一项夜间私密行动正在处理中……"
-    assert "玩家1" not in terminal.progress_events[1]
-    assert "狼人" not in terminal.progress_events[1]
+    assert terminal.transient_progress_events[0] == "1号 玩家1 正在组织公开发言……"
+    assert terminal.transient_progress_events[1] == "一项夜间私密行动正在处理中……"
+    assert "玩家1" not in terminal.transient_progress_events[1]
+    assert "狼人" not in terminal.transient_progress_events[1]
 
 
 def test_llm_token_summary_reports_cache_hits_without_private_context() -> None:
@@ -969,6 +980,74 @@ def test_llm_public_votes_are_collected_in_parallel() -> None:
     assert all(target is not None for target in votes.values())
 
 
+def test_parallel_llm_votes_respect_the_configured_request_limit() -> None:
+    """A large secret ballot must not burst every seat at one provider at once."""
+    provider = LLMProviderConfig(base_url="https://example.invalid/v1", model="test")
+    base = fixed_config()
+    config = replace(
+        base,
+        players=tuple(
+            replace(player, controller="llm", provider="test")
+            for player in base.players
+        ),
+        providers={"test": provider},
+        parallel_llm_votes=True,
+        max_parallel_llm_requests=2,
+    )
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    class LimitedController:
+        def act(self, _view, request):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            return AgentResponse(choice=request.options[0].value)
+
+    controllers = {
+        f"p{index}": LimitedController() for index in range(1, len(base.players) + 1)
+    }
+    game = Game(config, controllers=controllers, terminal=SilentTerminal())
+    game.phase = "vote"
+
+    game._collect_votes(None)  # noqa: SLF001
+
+    assert peak == 2
+
+
+def test_http_429_retry_uses_provider_backoff(monkeypatch) -> None:
+    """Rate limiting should pause before retrying instead of amplifying a burst."""
+    config = llm_seat_config(controller_retries=1, spectator_progress=True)
+    terminal = CapturingTerminal()
+    calls = 0
+    delays: list[float] = []
+
+    class RateLimitedOnce:
+        def act(self, _view, _request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ProviderHTTPError(429, retry_after_seconds=3.5)
+            return AgentResponse(text="重试成功")
+
+    monkeypatch.setattr(time, "sleep", delays.append)
+    game = Game(config, controllers={"p1": RateLimitedOnce()}, terminal=terminal)
+
+    response = game._controller_action(  # noqa: SLF001
+        game._by_id["p1"],  # noqa: SLF001
+        ActionRequest(ActionKind.SPEAK, "发言", requires_text=True),
+    )
+
+    assert response.text == "重试成功"
+    assert delays == [3.5]
+    assert any("Provider 限流" in item for item in terminal.transient_progress_events)
+
+
 def test_parallel_vote_failure_does_not_wait_for_another_stalled_future() -> None:
     """Strict failure handling must return without an unbounded executor join."""
     provider = LLMProviderConfig(base_url="https://example.invalid/v1", model="test")
@@ -1165,9 +1244,13 @@ def test_generated_config_uses_recommended_defaults_without_listing_them(
     assert config.checkpoint_path == "game_runs/private.checkpoint.json"
     assert config.public_transcript_path == "game_runs/public.log"
     assert config.parallel_llm_votes is True
+    assert config.max_parallel_llm_requests == 4
     assert config.human_strategy_notes is False
     assert config.providers["default"].stream is True
+    assert config.providers["default"].wire_api == "responses"
+    assert config.providers["default"].reasoning_effort == "high"
     assert config.players[1].provider == "default"
+    assert config.players[0].name == "真人玩家"
 
 
 def test_full_example_config_remains_available_for_advanced_options() -> None:
@@ -1180,6 +1263,8 @@ def test_full_example_config_remains_available_for_advanced_options() -> None:
     assert config["rules"]["randomize_seating"] is True
     assert config["providers"]["default"]["max_tokens"] == 2000
     assert config["providers"]["default"]["stream"] is True
+    assert config["providers"]["default"]["reasoning_effort"] == "high"
+    assert config["max_parallel_llm_requests"] == 4
 
 
 def test_custom_role_counts_and_partial_fixed_roles_are_supported(
@@ -1307,6 +1392,10 @@ def strict_schema_config() -> dict[str, object]:
             "providers.unused.stream",
         ),
         (lambda raw: raw.update(controller_retries=False), "controller_retries"),
+        (
+            lambda raw: raw.update(max_parallel_llm_requests=False),
+            "max_parallel_llm_requests",
+        ),
     ],
 )
 def test_config_schema_rejects_coerced_boolean_and_integer_values(
@@ -1321,6 +1410,17 @@ def test_config_schema_rejects_coerced_boolean_and_integer_values(
     config_path.write_text(json.dumps(raw), encoding="utf-8")
 
     with pytest.raises(TypeError, match=path):
+        load_config(config_path)
+
+
+def test_parallel_request_limit_must_be_positive(tmp_path) -> None:
+    """A zero worker limit must fail at startup instead of deadlocking votes."""
+    raw = strict_schema_config()
+    raw["max_parallel_llm_requests"] = 0
+    config_path = tmp_path / "invalid.json"
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="max_parallel_llm_requests"):
         load_config(config_path)
 
 

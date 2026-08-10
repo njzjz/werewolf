@@ -33,11 +33,13 @@ werewolf setup local.json --no-color
     "default": {
       "base_url": "https://api.openai.com/v1",
       "api_key_env": "OPENAI_API_KEY",
-      "model": "your-model-id"
+      "model": "your-model-id",
+      "wire_api": "responses",
+      "reasoning_effort": "high"
     }
   },
   "players": [
-    { "name": "你", "controller": "human" },
+    { "name": "真人玩家", "controller": "human" },
     "智能体1",
     "智能体2",
     "智能体3",
@@ -60,6 +62,10 @@ werewolf setup local.json --no-color
 | 恢复与日志 | `game_runs/private.checkpoint.json`、`game_runs/public.log` |
 | 终端体验   | 清屏、关键选择确认、LLM 投票并发                            |
 | 记忆       | 导出到 `game_memories/`                                     |
+
+推理强度没有跨 Provider 通用的“自动最高”值。省略 `reasoning_effort` 表示使用服务默认值，而不是最高档。质量优先建议从 `high` 开始；`xhigh`、`max` 等名称与支持范围由具体模型决定。程序会在 Chat Completions 请求中发送顶层 `reasoning_effort`，在 Responses 请求中发送 `reasoning.effort`。
+
+不要把玩家命名为 `你`、`我` 等代词。模型会在座位表和历史中反复看到这些名称，容易误判指代；推荐使用 `真人玩家`、`主持人` 或其他明确专名。
 
 若不需要某项文件输出，可以显式设置 `"checkpoint_path": null`、`"public_transcript_path": null` 或 `"memory_directory": null`。全部字段及当前值可通过 `werewolf init --full` 查看。
 
@@ -122,6 +128,7 @@ werewolf setup local.json --no-color
 | `human_strategy_notes`     | 真人行动后是否询问可选的私密策略笔记                          |
 | `confirm_critical_actions` | 投票、用药、开枪、查验等真人选择是否二次确认                  |
 | `parallel_llm_votes`       | 并行请求互不可见的 LLM 公开投票                               |
+| `max_parallel_llm_requests` | 并行投票同时发出的模型请求上限；默认 4，降低 429 限流风险     |
 
 ## 玩家控制器
 
@@ -149,13 +156,34 @@ werewolf setup local.json --no-color
 | `api_key`          | 仅适合本地占位密钥，不建议保存真实凭据                       |
 | `model`            | 服务实际接受的模型 ID                                        |
 | `wire_api`         | `responses` 或 `chat`                                        |
-| `reasoning_effort` | 兼容 Responses 推理强度，例如 `low`、`high`、`xhigh`         |
+| `reasoning_effort` | 推理强度；Chat 与 Responses 均会传递，具体档位由模型决定      |
 | `use_json_mode`    | 服务不支持 JSON mode 时设为 `false`；提示词仍要求 JSON       |
 | `stream`           | 默认开启，使用 SSE 接收增量，降低长推理经过代理时的超时风险  |
 | `force_ipv4`       | IPv6 不可达时强制 IPv4，同时保留 TLS 主机名验证              |
 | `extra_headers`    | 兼容服务要求的额外 HTTP 请求头                               |
 
 LLM 的增量内容不会直接打印到公开频道。客户端在本地组装完整 JSON，完成解析和合法性校验后，法官才会发布允许公开的文本。
+
+质量优先示例：
+
+```json
+{
+  "wire_api": "responses",
+  "reasoning_effort": "high",
+  "max_tokens": 4000
+}
+```
+
+兼容服务若主要提供 Chat Completions，也可以使用同一个字段：
+
+```json
+{
+  "wire_api": "chat",
+  "reasoning_effort": "max"
+}
+```
+
+第二个例子中的 `max` 不是 OpenAI 通用枚举，只适用于明确声明支持该值的 Provider。配置无法替代模型选择：速度型或小型模型即使开启高推理，策略质量仍可能明显弱于更强的推理模型。
 
 Chat 流式请求会附带 `stream_options.include_usage`，否则该接口不返回 token 统计；个别兼容服务拒绝该字段时会自动改用不带它的请求重发一次。只返回 `reasoning_content` 的推理网关也会被正确解析。模型没有产出任何正文时，错误信息会直接给出原因，例如 `finish_reason=length` 表示 `max_tokens` 太小，需要调高单动作输出预算。
 
@@ -223,7 +251,9 @@ werewolf play movie.json \
 
 严格模式中，私密夜间动作失败时终端错误不会显示玩家姓名或具体身份能力，避免恢复后污染信息边界。CLI 会保留恢复点并直接打印可复制的 `--resume` 命令。
 
-启动时还会检查常见实时体验风险：关闭进度、未配置恢复点、允许后备、`xhigh` 推理或超过 5000 token 的单动作输出预算都会在身份分配前给出公开提示。
+启动时还会检查常见实时体验风险：关闭进度、未配置恢复点、允许后备、`xhigh`/`max` 推理或超过 5000 token 的单动作输出预算都会在身份分配前给出公开提示。模型等待状态使用灰色单行原地刷新，动作完成后擦除；重试提示也不会持续刷入滚动区和公开日志。
+
+公开投票仍保持互不可见，但默认最多同时发送 4 个模型请求。HTTP 429 会遵循 Provider 的数字型 `Retry-After`，否则使用有上限的指数退避，避免十个席位同时立即重试造成限流风暴。
 
 ### 显式安全后备
 

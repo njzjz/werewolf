@@ -54,8 +54,11 @@ def test_tui_can_create_a_valid_config_without_direct_json_editing(
     assert result.start_game is False
     config = load_config(config_path)
     assert config.providers["default"].model == "test-model"
+    assert config.providers["default"].wire_api == "responses"
+    assert config.providers["default"].reasoning_effort == "high"
     assert len(config.players) == 8
     assert config.players[0].controller == "human"
+    assert config.players[0].name == "真人玩家"
     assert all(player.controller == "llm" for player in config.players[1:])
     assert "配置校验通过" in output.getvalue()
 

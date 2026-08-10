@@ -26,6 +26,7 @@ from .agents import (
     LLMController,
     OpenAICompatibleClient,
     PrivateResultReceiver,
+    ProviderHTTPError,
     SafeFallbackController,
     Terminal,
 )
@@ -238,6 +239,8 @@ class Game:
         self._started_at = time.monotonic()
         self._controller_metrics = ControllerMetrics()
         self._state_lock = threading.RLock()
+        self._retry_progress_lock = threading.Lock()
+        self._provider_retry_deadline = 0.0
         self._fallback_records: list[FallbackRecord] = []
         self._last_nonterminal_snapshot: dict[str, object] | None = None
         self.day = 0
@@ -778,11 +781,11 @@ class Game:
             for seat in self._seat_configs
             if seat.controller == "llm" and seat.provider in self.config.providers
         ]
-        if any(provider.reasoning_effort == "xhigh" for provider in providers):
+        if any(provider.reasoning_effort in {"xhigh", "max"} for provider in providers):
             notices.append(
                 self._t(
-                    "检测到 xhigh 推理强度；实时对局延迟可能显著增加，通常建议使用 high。",
-                    "xhigh reasoning is configured; live-game latency may be high, and high is usually preferable.",
+                    "检测到最高档推理强度；实时对局延迟可能显著增加，通常建议先使用 high。",
+                    "A maximum reasoning effort is configured; live-game latency may be high, and high is usually preferable.",
                 ),
             )
         if any(provider.max_tokens > 5000 for provider in providers):
@@ -1591,9 +1594,11 @@ class Game:
         heartbeat_stop = threading.Event()
         heartbeat: threading.Thread | None = None
         if self.config.spectator_progress:
-            self.terminal.progress(self._spectator_action_text(player, request))
+            self.terminal.transient_progress(
+                self._spectator_action_text(player, request),
+            )
             if isinstance(player.controller, LLMController):
-                effort = player.controller.client.config.reasoning_effort or "default"
+                effort = player.controller.client.config.reasoning_effort
                 heartbeat = threading.Thread(
                     target=self._spectator_heartbeat,
                     args=(heartbeat_stop, effort),
@@ -1618,6 +1623,7 @@ class Game:
             heartbeat_stop.set()
             if heartbeat is not None:
                 heartbeat.join(timeout=1)
+            if self.config.spectator_progress:
                 self.terminal.clear_transient_progress()
         return response
 
@@ -1684,13 +1690,18 @@ class Game:
         heartbeat: threading.Thread | None = None
         if pending:
             if self.config.spectator_progress:
-                self.terminal.progress(
+                self.terminal.transient_progress(
                     self._t(
                         f"正在并行收集 {len(pending)} 个互不可见的 LLM 投票……",
                         f"Collecting {len(pending)} mutually invisible LLM votes in parallel...",
                     ),
                 )
-            executor = ThreadPoolExecutor(max_workers=len(pending))
+            executor = ThreadPoolExecutor(
+                max_workers=min(
+                    len(pending),
+                    self.config.max_parallel_llm_requests,
+                ),
+            )
             for index in pending:
                 player, request = actions[index]
                 futures[index] = executor.submit(
@@ -1752,6 +1763,7 @@ class Game:
             heartbeat_stop.set()
             if heartbeat is not None:
                 heartbeat.join(timeout=1)
+            if self.config.spectator_progress:
                 self.terminal.clear_transient_progress()
             if executor is not None:
                 for future in futures.values():
@@ -1769,12 +1781,20 @@ class Game:
         while not stop.wait(1):
             completed = sum(future.done() for future in futures)
             elapsed = int(time.monotonic() - started)
-            self.terminal.transient_progress(
-                self._t(
+            retry_seconds = self._provider_retry_seconds()
+            if retry_seconds:
+                text = self._t(
+                    f"并行投票等待 Provider 限流恢复：{completed}/{len(futures)} 完成，"
+                    f"约 {retry_seconds} 秒后重试",
+                    f"Parallel votes waiting for provider rate limit: {completed}/"
+                    f"{len(futures)} complete; retrying in about {retry_seconds} seconds",
+                )
+            else:
+                text = self._t(
                     f"并行投票处理中：{completed}/{len(futures)} 完成，已用 {elapsed} 秒",
                     f"Parallel votes: {completed}/{len(futures)} complete after {elapsed}s",
-                ),
-            )
+                )
+            self.terminal.transient_progress(text)
 
     def _action_signature(
         self,
@@ -1989,7 +2009,18 @@ class Game:
                 if attempt < self.config.controller_retries:
                     if is_llm:
                         self._increment_metric("retries")
-                    self._announce_controller_retry(attempt + 1)
+                    retry_delay = self._controller_retry_delay(exc, attempt)
+                    self._announce_controller_retry(
+                        attempt + 1,
+                        delay_seconds=retry_delay,
+                        rate_limited=(
+                            isinstance(exc, ProviderHTTPError)
+                            and exc.status_code == 429
+                        ),
+                    )
+                    if retry_delay:
+                        self._extend_provider_retry_deadline(retry_delay)
+                        time.sleep(retry_delay)
                     continue
                 if self.config.strict_controllers:
                     msg = self._strict_controller_error(
@@ -2181,28 +2212,85 @@ class Game:
             )
         self.terminal.progress(text)
 
-    def _announce_controller_retry(self, retry_number: int) -> None:
+    @staticmethod
+    def _controller_retry_delay(exc: Exception, attempt: int) -> float:
+        """Back off boundedly for provider overload without delaying bad JSON."""
+        if not isinstance(exc, ProviderHTTPError):
+            return 0.0
+        if exc.status_code == 429:
+            exponential = float(min(2 ** (attempt + 1), 8))
+            return max(exponential, exc.retry_after_seconds or 0.0)
+        if exc.status_code >= 500:
+            return float(min(2**attempt, 4))
+        return 0.0
+
+    def _extend_provider_retry_deadline(self, delay_seconds: float) -> None:
+        """Expose the longest active provider backoff to the transient heartbeat."""
+        deadline = time.monotonic() + delay_seconds
+        with self._retry_progress_lock:
+            self._provider_retry_deadline = max(
+                self._provider_retry_deadline,
+                deadline,
+            )
+
+    def _provider_retry_seconds(self) -> int:
+        """Return rounded-up seconds until the active provider backoff expires."""
+        with self._retry_progress_lock:
+            remaining = self._provider_retry_deadline - time.monotonic()
+        return max(0, int(remaining + 0.999))
+
+    def _announce_controller_retry(
+        self,
+        retry_number: int,
+        *,
+        delay_seconds: float = 0.0,
+        rate_limited: bool = False,
+    ) -> None:
         """Expose a technical retry without identifying a private actor."""
         if not self.config.spectator_progress:
             return
-        self.terminal.progress(
-            self._t(
-                f"LLM 调用未成功，正在进行第 {retry_number}/{self.config.controller_retries} 次重试……",
-                f"The LLM call failed; retry {retry_number}/{self.config.controller_retries} is starting...",
-            ),
-        )
+        if rate_limited and delay_seconds:
+            text = self._t(
+                f"Provider 限流，{delay_seconds:g} 秒后进行第 "
+                f"{retry_number}/{self.config.controller_retries} 次重试……",
+                f"Provider rate limited; retry {retry_number}/"
+                f"{self.config.controller_retries} in {delay_seconds:g} seconds...",
+            )
+        else:
+            text = self._t(
+                f"LLM 调用未成功，正在进行第 {retry_number}/"
+                f"{self.config.controller_retries} 次重试……",
+                f"The LLM call failed; retry {retry_number}/"
+                f"{self.config.controller_retries} is starting...",
+            )
+        self.terminal.transient_progress(text)
 
-    def _spectator_heartbeat(self, stop: threading.Event, effort: str) -> None:
+    def _spectator_heartbeat(
+        self,
+        stop: threading.Event,
+        effort: str | None,
+    ) -> None:
         """Update one transient elapsed-time status while an LLM call is pending."""
         started = time.monotonic()
         while not stop.wait(1):
             elapsed = int(time.monotonic() - started)
-            self.terminal.transient_progress(
-                self._t(
+            retry_seconds = self._provider_retry_seconds()
+            if retry_seconds:
+                text = self._t(
+                    f"Provider 限流，约 {retry_seconds} 秒后重试",
+                    f"Provider rate limited; retrying in about {retry_seconds} seconds",
+                )
+            elif effort:
+                text = self._t(
                     f"LLM {effort} 推理中：{elapsed} 秒",
                     f"LLM {effort} reasoning: {elapsed} seconds",
-                ),
-            )
+                )
+            else:
+                text = self._t(
+                    f"LLM 响应中：{elapsed} 秒",
+                    f"Waiting for LLM: {elapsed} seconds",
+                )
+            self.terminal.transient_progress(text)
 
     def _spectator_action_text(
         self,

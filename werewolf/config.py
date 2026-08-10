@@ -121,6 +121,7 @@ class GameConfig:
     human_strategy_notes: bool = False
     confirm_critical_actions: bool = True
     parallel_llm_votes: bool = True
+    max_parallel_llm_requests: int = 4
 
 
 def _object(value: object, path: str) -> dict[str, Any]:
@@ -464,6 +465,10 @@ def load_config(path: str | Path) -> GameConfig:
             raw.get("parallel_llm_votes", True),
             "parallel_llm_votes",
         ),
+        max_parallel_llm_requests=_integer(
+            raw.get("max_parallel_llm_requests", 4),
+            "max_parallel_llm_requests",
+        ),
     )
     validate_config(config)
     return config
@@ -603,6 +608,7 @@ def _validate_runtime_schema(config: GameConfig) -> None:
         _boolean(getattr(config, field_name), field_name)
     _integer(config.context_char_limit, "context_char_limit")
     _integer(config.controller_retries, "controller_retries")
+    _integer(config.max_parallel_llm_requests, "max_parallel_llm_requests")
     if config.seed is not None:
         _integer(config.seed, "seed")
     for field_name in (
@@ -686,6 +692,9 @@ def _validate_runtime_schema(config: GameConfig) -> None:
     if config.controller_retries < 0:
         msg = "controller_retries cannot be negative"
         raise ValueError(msg)
+    if not 1 <= config.max_parallel_llm_requests <= MAX_PLAYERS:
+        msg = f"max_parallel_llm_requests must be between 1 and {MAX_PLAYERS}"
+        raise ValueError(msg)
     outputs = {
         label: Path(value).resolve()
         for label, value in (
@@ -736,10 +745,12 @@ def recommended_config() -> dict[str, Any]:
                 "base_url": "https://api.openai.com/v1",
                 "api_key_env": "OPENAI_API_KEY",
                 "model": "your-model-id",
+                "wire_api": "responses",
+                "reasoning_effort": "high",
             },
         },
         "players": [
-            {"name": "你", "controller": "human"},
+            {"name": "真人玩家", "controller": "human"},
             *(f"智能体{index}" for index in range(1, 8)),
         ],
     }
@@ -749,7 +760,7 @@ def example_config() -> dict[str, Any]:
     """Return the exhaustive reference template retained for advanced users."""
     players: list[dict[str, Any]] = [
         {
-            "name": "你",
+            "name": "真人玩家",
             "controller": "human",
             "persona": "认真但不失幽默的玩家",
             "skills": ["logic", "social", "memory"],
@@ -781,18 +792,19 @@ def example_config() -> dict[str, Any]:
         "human_strategy_notes": False,
         "confirm_critical_actions": True,
         "parallel_llm_votes": True,
+        "max_parallel_llm_requests": 4,
         "providers": {
             "default": {
                 "base_url": "https://api.openai.com/v1",
                 "api_key": None,
                 "api_key_env": "OPENAI_API_KEY",
-                "model": "gpt-4.1-mini",
+                "model": "your-model-id",
                 "temperature": 0.7,
                 "timeout": 120,
                 "max_tokens": 2000,
                 "use_json_mode": True,
-                "wire_api": "chat",
-                "reasoning_effort": None,
+                "wire_api": "responses",
+                "reasoning_effort": "high",
                 "force_ipv4": False,
                 "stream": True,
                 "prompt_cache": False,
@@ -851,6 +863,7 @@ def config_to_dict(config: GameConfig) -> dict[str, Any]:
         "human_strategy_notes": config.human_strategy_notes,
         "confirm_critical_actions": config.confirm_critical_actions,
         "parallel_llm_votes": config.parallel_llm_votes,
+        "max_parallel_llm_requests": config.max_parallel_llm_requests,
         "providers": {
             name: asdict(provider) for name, provider in config.providers.items()
         },

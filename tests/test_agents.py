@@ -193,6 +193,30 @@ def test_responses_api_payload_and_output_shape() -> None:
     assert "messages" not in captured
 
 
+def test_chat_api_sends_configured_reasoning_effort() -> None:
+    """Chat-compatible reasoning models must not silently lose their effort."""
+    captured: dict[str, Any] = {}
+
+    def transport(payload: dict[str, Any]) -> dict[str, Any]:
+        captured.update(payload)
+        return {"choices": [{"message": {"content": '{"text":"收到"}'}}]}
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(
+            base_url="https://example.invalid/v1",
+            model="reasoning-model",
+            wire_api="chat",
+            reasoning_effort="max",
+        ),
+        transport=transport,
+    )
+
+    client.complete([{"role": "user", "content": "行动"}])
+
+    assert captured["reasoning_effort"] == "max"
+    assert "reasoning" not in captured
+
+
 def test_responses_prompt_cache_uses_stable_private_key_and_tracks_usage() -> None:
     """Cache routing should be stable, private, and measurable from API usage."""
     captured: list[dict[str, Any]] = []
@@ -438,6 +462,9 @@ def test_llm_prompt_states_the_public_seat_the_player_must_claim() -> None:
     )
 
     assert "公开称呼：1号 智能体5" in messages[0]["content"]
+    assert "名字恰好是“你”" in messages[0]["content"]
+    assert "不得用后来出现的白天发言" in messages[0]["content"]
+    assert "不得逐句复述" in messages[0]["content"]
     assert "text 不能为空" in messages[0]["content"]
     assert "必须提供 text：True" in messages[-1]["content"]
 
@@ -560,6 +587,7 @@ def test_provider_http_error_exposes_only_safe_structured_metadata() -> None:
     """An echoed private request body must never enter a printable exception."""
     headers = Message()
     headers["x-request-id"] = "req-safe_123"
+    headers["retry-after"] = "3.5"
     body = io.BytesIO(
         b'{"error":{"code":"bad_request","param":"messages",'
         b'"message":"ULTRA_PRIVATE_WOLF_CHAT"}}',
@@ -578,6 +606,7 @@ def test_provider_http_error_exposes_only_safe_structured_metadata() -> None:
     assert error.status_code == 400
     assert error.error_code == "bad_request"
     assert error.request_id == "req-safe_123"
+    assert error.retry_after_seconds == 3.5
     assert "ULTRA_PRIVATE_WOLF_CHAT" not in str(error)
     assert "messages" not in str(error)
 
@@ -806,6 +835,33 @@ def test_terminal_persists_only_explicit_public_output(tmp_path) -> None:
     assert transcript.read_text(encoding="utf-8") == (
         "\n[法官] 天亮了。\n[观战] 公开行动处理中……\n[玩家01] 这是公开发言。\n"
     )
+
+
+def test_terminal_transient_progress_is_muted_and_erased(monkeypatch) -> None:
+    """Live waiting state should look subdued and leave no completed line behind."""
+
+    class TTYBuffer(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    output = TTYBuffer()
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(agents_module.sys, "stdout", output)
+    terminal = Terminal(clear_screen=False)
+
+    terminal.transient_progress("LLM high 推理中：1 秒")
+    terminal.clear_transient_progress()
+
+    rendered = output.getvalue()
+    assert "\033[38;5;244m[观战]" in rendered
+    assert rendered.endswith("\r\033[2K")
+
+    output.seek(0)
+    output.truncate()
+    monkeypatch.setenv("NO_COLOR", "1")
+    terminal.transient_progress("等待 Provider")
+
+    assert "\033[2m[观战] 等待 Provider\033[0m" in output.getvalue()
 
 
 def test_terminal_sanitizes_controls_and_frames_every_statement_line(

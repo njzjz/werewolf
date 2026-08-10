@@ -422,8 +422,10 @@ class ConfigurationTUI:
             base_url="https://api.openai.com/v1",
             model="your-model-id",
             api_key_env="OPENAI_API_KEY",
+            wire_api="responses",
+            reasoning_effort="high",
         )
-        players = [PlayerConfig(name="你", controller="human")]
+        players = [PlayerConfig(name="真人玩家", controller="human")]
         players.extend(
             PlayerConfig(
                 name=f"智能体{index}",
@@ -996,6 +998,8 @@ class ConfigurationTUI:
             base_url=base_url,
             model=model,
             api_key_env=api_key_env or None,
+            wire_api="responses",
+            reasoning_effort="high",
         )
         config = replace(self.config, providers=providers)
         llm_players = [
@@ -1126,7 +1130,7 @@ class ConfigurationTUI:
                         prompt_cache_retention=None,
                     )
             elif selected == "reasoning":
-                values = ["none", "low", "medium", "high", "xhigh"]
+                values = ["none", "low", "medium", "high", "xhigh", "max"]
                 current = provider.reasoning_effort or "none"
                 if current not in values:
                     values.insert(-1, current)
@@ -1372,6 +1376,10 @@ class ConfigurationTUI:
                         f"LLM 公开投票并发        {self._on_off(config.parallel_llm_votes)}",
                     ),
                     Choice(
+                        "parallel_limit",
+                        f"并发模型请求上限        {config.max_parallel_llm_requests}",
+                    ),
+                    Choice(
                         "context",
                         f"LLM 历史字符上限        {config.context_char_limit}",
                     ),
@@ -1450,6 +1458,17 @@ class ConfigurationTUI:
                     config,
                     parallel_llm_votes=not config.parallel_llm_votes,
                 )
+            elif selected == "parallel_limit":
+                self.config = replace(
+                    config,
+                    max_parallel_llm_requests=self.ui.number_input(
+                        "并发模型请求上限",
+                        "限制秘密投票同时发往 Provider 的请求数，降低 HTTP 429 风险。",
+                        default=config.max_parallel_llm_requests,
+                        minimum=1,
+                        maximum=MAX_PLAYERS,
+                    ),
+                )
             elif selected == "context":
                 self.config = replace(
                     config,
@@ -1474,6 +1493,7 @@ class ConfigurationTUI:
                     confirm_critical_actions=True,
                     human_strategy_notes=False,
                     parallel_llm_votes=True,
+                    max_parallel_llm_requests=4,
                     context_char_limit=24000,
                 )
             self.dirty = True
@@ -1572,6 +1592,10 @@ class ConfigurationTUI:
                 warnings.append(
                     f"Provider {name!r} 仍在 JSON 中保存明文 api_key",
                 )
+        if any(player.name == "你" for player in self.config.players):
+            warnings.append(
+                "玩家名“你”容易被 LLM 误解为第二人称，建议改为“真人玩家”",
+            )
         if not self.config.checkpoint_path:
             warnings.append("未启用私密恢复点，中止后无法续局")
         if not self.config.strict_controllers:
@@ -1620,9 +1644,9 @@ class ConfigurationTUI:
     @staticmethod
     def _is_generated_name(name: str) -> bool:
         """Recognize names created by the templates so layouts may relabel them."""
-        if name == "你":
+        if name in {"你", "真人玩家"}:
             return True
-        prefixes = ("真人", "智能体", "机器人", "玩家")
+        prefixes = ("真人", "真人玩家", "智能体", "机器人", "玩家")
         return any(
             name.startswith(prefix) and name[len(prefix) :].isdigit()
             for prefix in prefixes
@@ -1632,7 +1656,7 @@ class ConfigurationTUI:
     def _generated_name(controller: str, ordinal: int) -> str:
         """Return a friendly generated name for one controller type."""
         if controller == "human":
-            return "你" if ordinal == 1 else f"真人{ordinal}"
+            return "真人玩家" if ordinal == 1 else f"真人玩家{ordinal}"
         if controller == "llm":
             return f"智能体{ordinal}"
         return f"机器人{ordinal}"
@@ -1695,8 +1719,9 @@ class ConfigurationTUI:
             name = next(iter(referenced))
             provider = self.config.providers.get(name)
             if provider is not None:
+                effort = provider.reasoning_effort or "默认推理"
                 return sanitize_rendered_text(
-                    f"{name} · {provider.model} · {provider.wire_api}",
+                    f"{name} · {provider.model} · {provider.wire_api} · {effort}",
                     limit=180,
                 )
         return f"{len(self.config.providers)} 个 Provider · {len(referenced)} 个已使用"
