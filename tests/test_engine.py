@@ -1245,6 +1245,33 @@ def test_medium_receives_only_the_previous_exiles_alignment() -> None:
     )
 
 
+def test_day_without_an_elimination_clears_the_medium_result() -> None:
+    """A tied or empty vote must not repeat an older exile the next night."""
+    roles = [
+        Role.WEREWOLF,
+        Role.MEDIUM,
+        Role.SEER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+    ]
+    game = Game(fixed_role_config(roles), terminal=SilentTerminal())
+    game.day = 2
+    game._last_exiled_id = "p4"  # noqa: SLF001 - prior-day state under test.
+    game._discussion_order = lambda: []  # type: ignore[method-assign]  # noqa: SLF001
+    game._collect_votes = lambda _eligible: {}  # type: ignore[method-assign]  # noqa: SLF001
+
+    game._daytime()  # noqa: SLF001
+    game.day = 3
+    game._medium_turn()  # noqa: SLF001
+
+    assert game._last_exiled_id is None  # noqa: SLF001
+    assert not any(
+        "灵媒结果" in event.text
+        for event in game._by_id["p2"].memory.events  # noqa: SLF001
+    )
+
+
 def test_fox_survives_wolf_attack() -> None:
     """A wolf attack on the Fox resolves as a public peaceful night."""
     roles = [

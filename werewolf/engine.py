@@ -1145,6 +1145,10 @@ class Game:
         return saved, poisoned
 
     def _daytime(self) -> None:
+        # This field represents the current day's direct exile, not the most
+        # recent exile across the whole match. A no-vote or tied day must leave
+        # no result for the Medium on the following night.
+        self._last_exiled_id = None
         self.phase = "discussion"
         speakers = self._discussion_order()
         start_name = (
