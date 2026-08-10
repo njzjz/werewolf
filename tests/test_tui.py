@@ -56,6 +56,8 @@ def test_tui_can_create_a_valid_config_without_direct_json_editing(
     assert config.providers["default"].model == "test-model"
     assert config.providers["default"].wire_api == "responses"
     assert config.providers["default"].reasoning_effort == "high"
+    assert config.enable_tools is True
+    assert config.max_tool_rounds == 2
     assert len(config.players) == 8
     assert config.players[0].controller == "human"
     assert config.players[0].name == "真人玩家"

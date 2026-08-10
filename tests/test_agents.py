@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import time
 import urllib.error
@@ -33,6 +34,7 @@ from werewolf.models import (
     Thought,
     Visibility,
 )
+from werewolf.tools import PlayerToolbox
 
 
 def test_llm_receives_only_supplied_personal_view() -> None:
@@ -94,6 +96,12 @@ def test_llm_receives_only_supplied_personal_view() -> None:
     serialized = str(captured["messages"])
     assert "仅一号可见的查验结果" in serialized
     assert "二号是狼人" not in serialized
+    assert captured["tool_choice"] == "required"
+    assert {tool["function"]["name"] for tool in captured["tools"]} == {
+        "get_evidence_ledger",
+        "search_visible_history",
+        "get_player_dossier",
+    }
     assert response.choice == "p2"
     assert response.thought == "怀疑二号"
 
@@ -104,6 +112,28 @@ def test_llm_parser_accepts_fenced_json() -> None:
         '```json\n{"choice": null, "text": "你好"}\n```',
     )
     assert parsed["text"] == "你好"
+
+
+def test_llm_does_not_force_an_empty_history_lookup() -> None:
+    """Opening actions may use tools, but should not pay for a useless forced call."""
+    captured: dict[str, Any] = {}
+
+    def transport(payload: dict[str, Any]) -> dict[str, Any]:
+        captured.update(payload)
+        return {"choices": [{"message": {"content": '{"text":"开场发言"}'}}]}
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+        transport=transport,
+    )
+
+    LLMController(client).act(
+        seat_view(),
+        ActionRequest(ActionKind.SPEAK, "请开场", requires_text=True),
+    )
+
+    assert "tools" in captured
+    assert "tool_choice" not in captured
 
 
 def test_chat_completion_falls_back_to_reasoning_content() -> None:
@@ -216,6 +246,171 @@ def test_chat_api_sends_configured_reasoning_effort() -> None:
 
     assert captured["reasoning_effort"] == "max"
     assert "reasoning" not in captured
+
+
+def test_chat_tools_continue_with_private_results_and_bounded_rounds() -> None:
+    """Chat function calls should be executed and continued in one private loop."""
+    captured: list[dict[str, Any]] = []
+    responses = [
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call-ledger",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_evidence_ledger",
+                                    "arguments": "{}",
+                                },
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                },
+            ],
+        },
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"choice":"p3","text":"投三号"}',
+                    },
+                },
+            ],
+        },
+    ]
+
+    def transport(payload: dict[str, Any]) -> dict[str, Any]:
+        captured.append(copy.deepcopy(payload))
+        return responses.pop(0)
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+        transport=transport,
+    )
+    toolbox = PlayerToolbox(seat_view())
+
+    result = client.complete_with_tools(
+        [{"role": "user", "content": "请投票"}],
+        toolbox.specs,
+        toolbox.execute,
+        max_rounds=1,
+        require_first_tool=True,
+    )
+
+    assert result == '{"choice":"p3","text":"投三号"}'
+    assert captured[0]["tools"][0]["type"] == "function"
+    assert captured[0]["tools"][0]["function"]["name"] == "get_evidence_ledger"
+    assert captured[0]["tool_choice"] == "required"
+    assert "tools" not in captured[1]
+    assert "tool_choice" not in captured[1]
+    assert captured[1]["messages"][-2]["tool_calls"][0]["id"] == "call-ledger"
+    assert captured[1]["messages"][-1]["role"] == "tool"
+    assert captured[1]["messages"][-1]["tool_call_id"] == "call-ledger"
+    assert '"ok": true' in captured[1]["messages"][-1]["content"]
+    assert client.observed_tool_calls == 1
+    assert client.observed_tool_failures == 0
+
+
+def test_responses_tools_preserve_output_items_for_continuation() -> None:
+    """Responses reasoning and calls must be replayed before function output."""
+    captured: list[dict[str, Any]] = []
+    responses = [
+        {
+            "output": [
+                {"type": "reasoning", "id": "rs_1", "summary": []},
+                {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call-search",
+                    "name": "search_visible_history",
+                    "arguments": '{"query":"智能体3"}',
+                },
+            ],
+        },
+        {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": '{"choice":null,"text":"已核对"}',
+                        },
+                    ],
+                },
+            ],
+        },
+    ]
+
+    def transport(payload: dict[str, Any]) -> dict[str, Any]:
+        captured.append(copy.deepcopy(payload))
+        return responses.pop(0)
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(
+            base_url="https://example.invalid/v1",
+            model="test",
+            wire_api="responses",
+        ),
+        transport=transport,
+    )
+    toolbox = PlayerToolbox(seat_view())
+
+    result = client.complete_with_tools(
+        [{"role": "user", "content": "回顾历史"}],
+        toolbox.specs,
+        toolbox.execute,
+        max_rounds=2,
+        require_first_tool=True,
+    )
+
+    assert result == '{"choice":null,"text":"已核对"}'
+    assert captured[0]["tools"][0]["name"] == "get_evidence_ledger"
+    assert captured[0]["tool_choice"] == "required"
+    continuation = captured[1]["input"]
+    assert continuation[-3]["type"] == "reasoning"
+    assert continuation[-2]["type"] == "function_call"
+    assert continuation[-1]["type"] == "function_call_output"
+    assert continuation[-1]["call_id"] == "call-search"
+
+
+def test_tools_fall_back_when_provider_rejects_the_field() -> None:
+    """A compatible provider without tools should be probed once, then remembered."""
+    captured: list[dict[str, Any]] = []
+
+    def transport(payload: dict[str, Any]) -> dict[str, Any]:
+        captured.append(copy.deepcopy(payload))
+        if "tools" in payload:
+            raise ProviderHTTPError(400, unsupported_field="tools")
+        return {"choices": [{"message": {"content": '{"text":"普通回答"}'}}]}
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+        transport=transport,
+    )
+    toolbox = PlayerToolbox(seat_view())
+
+    first = client.complete_with_tools(
+        [{"role": "user", "content": "行动"}],
+        toolbox.specs,
+        toolbox.execute,
+        max_rounds=2,
+        require_first_tool=True,
+    )
+    second = client.complete_with_tools(
+        [{"role": "user", "content": "再行动"}],
+        toolbox.specs,
+        toolbox.execute,
+        max_rounds=2,
+        require_first_tool=True,
+    )
+
+    assert first == second == '{"text":"普通回答"}'
+    assert ["tools" in payload for payload in captured] == [True, False, False]
 
 
 def test_responses_prompt_cache_uses_stable_private_key_and_tracks_usage() -> None:

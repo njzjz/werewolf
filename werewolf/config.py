@@ -122,6 +122,8 @@ class GameConfig:
     confirm_critical_actions: bool = True
     parallel_llm_votes: bool = True
     max_parallel_llm_requests: int = 4
+    enable_tools: bool = True
+    max_tool_rounds: int = 2
 
 
 def _object(value: object, path: str) -> dict[str, Any]:
@@ -469,6 +471,11 @@ def load_config(path: str | Path) -> GameConfig:
             raw.get("max_parallel_llm_requests", 4),
             "max_parallel_llm_requests",
         ),
+        enable_tools=_boolean(raw.get("enable_tools", True), "enable_tools"),
+        max_tool_rounds=_integer(
+            raw.get("max_tool_rounds", 2),
+            "max_tool_rounds",
+        ),
     )
     validate_config(config)
     return config
@@ -604,11 +611,13 @@ def _validate_runtime_schema(config: GameConfig) -> None:
         "human_strategy_notes",
         "confirm_critical_actions",
         "parallel_llm_votes",
+        "enable_tools",
     ):
         _boolean(getattr(config, field_name), field_name)
     _integer(config.context_char_limit, "context_char_limit")
     _integer(config.controller_retries, "controller_retries")
     _integer(config.max_parallel_llm_requests, "max_parallel_llm_requests")
+    _integer(config.max_tool_rounds, "max_tool_rounds")
     if config.seed is not None:
         _integer(config.seed, "seed")
     for field_name in (
@@ -694,6 +703,9 @@ def _validate_runtime_schema(config: GameConfig) -> None:
         raise ValueError(msg)
     if not 1 <= config.max_parallel_llm_requests <= MAX_PLAYERS:
         msg = f"max_parallel_llm_requests must be between 1 and {MAX_PLAYERS}"
+        raise ValueError(msg)
+    if not 1 <= config.max_tool_rounds <= 8:
+        msg = "max_tool_rounds must be between 1 and 8"
         raise ValueError(msg)
     outputs = {
         label: Path(value).resolve()
@@ -793,6 +805,8 @@ def example_config() -> dict[str, Any]:
         "confirm_critical_actions": True,
         "parallel_llm_votes": True,
         "max_parallel_llm_requests": 4,
+        "enable_tools": True,
+        "max_tool_rounds": 2,
         "providers": {
             "default": {
                 "base_url": "https://api.openai.com/v1",
@@ -864,6 +878,8 @@ def config_to_dict(config: GameConfig) -> dict[str, Any]:
         "confirm_critical_actions": config.confirm_critical_actions,
         "parallel_llm_votes": config.parallel_llm_votes,
         "max_parallel_llm_requests": config.max_parallel_llm_requests,
+        "enable_tools": config.enable_tools,
+        "max_tool_rounds": config.max_tool_rounds,
         "providers": {
             name: asdict(provider) for name, provider in config.providers.items()
         },

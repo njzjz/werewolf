@@ -5,6 +5,7 @@
 - 游戏语言、内置电影牌组、经典人数和自定义身份计数；
 - 真人、LLM、本地机器人数量，以及逐席名称、persona、技能和固定身份；
 - 多个 OpenAI-compatible Provider、模型、接口协议、推理强度、流式传输和 Prompt Caching；
+- LLM 只读证据工具及每个动作允许的工具往返轮数；
 - 全部房规、终端交互、严格模式、恢复点、公开日志和个人记忆导出；
 - 保存前完整校验，以及“保存并开始游戏”。
 
@@ -129,6 +130,8 @@ werewolf setup local.json --no-color
 | `confirm_critical_actions` | 投票、用药、开枪、查验等真人选择是否二次确认                  |
 | `parallel_llm_votes`       | 并行请求互不可见的 LLM 公开投票                               |
 | `max_parallel_llm_requests` | 并行投票同时发出的模型请求上限；默认 4，降低 429 限流风险     |
+| `enable_tools`             | 是否允许 LLM 调用当前玩家范围内的只读证据工具；默认开启       |
+| `max_tool_rounds`          | 单个动作最多工具往返轮数；默认 2，可配置 1–8                  |
 
 ## 玩家控制器
 
@@ -189,6 +192,29 @@ LLM 的增量内容不会直接打印到公开频道。客户端在本地组装�
 
 Chat 流式请求会附带 `stream_options.include_usage`，否则该接口不返回 token 统计；个别兼容服务拒绝该字段时会自动改用不带它的请求重发一次。只返回 `reasoning_content` 的推理网关也会被正确解析。模型没有产出任何正文时，错误信息会直接给出原因，例如 `finish_reason=length` 表示 `max_tokens` 太小，需要调高单动作输出预算。
 
+## AI 只读证据工具
+
+LLM 默认通过 Chat Completions 或 Responses 的原生 function calling 使用三个工具：
+
+- `get_evidence_ledger`：整理当前玩家可见的角色提及、公开票型、最新发言、私密事件和策略笔记；
+- `search_visible_history`：在当前玩家的完整可见历史中搜索文本，可按公开、单人私密或队伍频道过滤；
+- `get_player_dossier`：按公开玩家 ID 汇总某人的发言、他人提及、票型和当前玩家可见的私密线索。
+
+工具处理器只接收引擎已经裁剪过的 `PlayerView`，不能读取法官身份真相、其他玩家记忆、文件、网络或 Shell。工具结果只存在于该玩家当前动作的内存对话中，不写入公开事件、公开日志，也不会发给其他玩家。公开发言即使由工具检索出来仍是不可信证据，角色自称不会被自动升级成确认事实。
+
+默认设置为：
+
+```json
+{
+  "enable_tools": true,
+  "max_tool_rounds": 2
+}
+```
+
+工具循环有严格轮数上限。有可见历史时，首轮会要求模型至少执行一次只读检索，防止速度型模型无视可选工具；后续轮次仍由模型按需决定，没有历史的开局动作也不会被迫做无意义查询。达到上限后会要求模型直接给出最终 JSON。兼容 Provider 若明确拒绝 `tools` 或 `tool_choice` 字段，客户端会记住该能力缺失，并自动退回普通结构化回答。工具调用需要完整保留 function-call continuation，因此发生工具调用的动作使用非流式完整响应；普通无工具请求仍沿用配置的 SSE 流式路径。终局 token 摘要会同时显示工具调用数和失败数。
+
+证据工具主要提升长局中的回溯与一致性，不替代强模型和足够的 `reasoning_effort`。它们也会增加请求轮数、输入 token 与延迟；若 Provider 的工具实现较差，可在 TUI 的“终端体验与安全”中关闭，或设置 `"enable_tools": false`。
+
 ## Prompt Caching
 
 提示词固定采用“公共规则 → 公共事件历史 → 公共状态 → 玩家私密身份 → 私密频道历史 → 私密策略笔记 → 当前动态请求”的顺序。所有玩家可共享尽可能长的公共前缀，私密身份与历史只出现在共享前缀之后；公共发言被明确标记为不可信转录，不能借此覆盖法官规则或索取私密信息。
@@ -206,7 +232,7 @@ Responses provider 可选：
 
 开启后，客户端把公共规则与每名玩家稳定的私密上下文散列成不含明文身份信息的独立 `prompt_cache_key`。动态公共/私密历史和当前动作不会进入该路由键。`prompt_cache_retention` 可选 `in-memory` 或 `24h`，实际支持范围由模型和兼容服务决定。
 
-部分代理会拒绝这些新字段，因此默认关闭。即使 `prompt_cache` 为 `false`，上游若支持自动前缀缓存，稳定前缀设计仍然有效。游戏结束时，如果 provider 返回 `usage`，终端会汇总输入、缓存命中和输出 token；token 统计只覆盖当前进程，游戏时长和控制器可靠性统计会随恢复点延续。
+部分代理会拒绝这些新字段，因此默认关闭。即使 `prompt_cache` 为 `false`，上游若支持自动前缀缓存，稳定前缀设计仍然有效。工具定义对所有玩家保持稳定，工具结果只追加在公共与私密提示前缀之后，因此不会破坏已经命中的前缀；但每次工具往返都会新增后缀 token，所以“缓存 token 数”可能上升而总体缓存率仍受动态内容占比影响。游戏结束时，如果 provider 返回 `usage`，终端会汇总输入、缓存命中、输出 token 和工具调用；token 统计只覆盖当前进程，游戏时长和控制器可靠性统计会随恢复点延续。
 
 缓存命中的读取兼容三种常见写法：`prompt_tokens_details.cached_tokens` 或 `input_tokens_details.cached_tokens`（OpenAI、vLLM、DashScope）、`prompt_cache_hit_tokens`（DeepSeek 官方 API）、`cache_read_input_tokens`（Anthropic 兼容网关）。如果 provider 的 `usage` 里一个都没有，终端会显示“缓存命中 未知”，而不是 0%——这类网关只是没有上报缓存字段，未必真的没有命中缓存。
 
