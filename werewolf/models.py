@@ -163,12 +163,41 @@ class Thought:
     text: str
 
 
+@dataclass(frozen=True)
+class PlayerBelief:
+    """One bounded, evidence-linked private belief about another player.
+
+    Scores are subjective model estimates rather than judge facts. Evidence
+    references point only to events already visible in the owning player's
+    memory, so a later turn can distinguish a supported update from a hunch.
+    """
+
+    player_id: str
+    suspicion: int
+    confidence: int
+    evidence_sequences: tuple[int, ...] = ()
+    rationale: str = ""
+
+
+@dataclass(frozen=True)
+class StrategyState:
+    """Latest structured private strategy snapshot for one player."""
+
+    day: int = 0
+    phase: str = ""
+    beliefs: tuple[PlayerBelief, ...] = ()
+    open_questions: tuple[str, ...] = ()
+    plan: str = ""
+    counter_case: str = ""
+
+
 @dataclass
 class PlayerMemory:
     """Long-lived, per-player observations and private strategy notes."""
 
     events: list[MemoryEvent] = field(default_factory=list)
     thoughts: list[Thought] = field(default_factory=list)
+    strategy: StrategyState = field(default_factory=StrategyState)
 
     def remember(self, event: MemoryEvent) -> None:
         """Append an event that was explicitly delivered to this player."""
@@ -227,6 +256,7 @@ class PlayerView:
     seat_number: int = 0
     seat_players: tuple[tuple[str, int, str], ...] = ()
     mechanical_context: str = ""
+    strategy: StrategyState = field(default_factory=StrategyState)
 
     @property
     def own_label(self) -> str:
@@ -294,6 +324,7 @@ class AgentResponse:
     text: str = ""
     thought: str = ""
     note: str = ""
+    strategy: StrategyState | None = None
     used_fallback: bool = False
     fallback_error: str = ""
     attempts: int = 1

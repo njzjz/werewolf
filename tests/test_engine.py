@@ -18,6 +18,7 @@ from werewolf.agents import (
     LLMController,
     OpenAICompatibleClient,
     ProviderHTTPError,
+    ProviderOutputLimitError,
     Terminal,
 )
 from werewolf.config import (
@@ -37,8 +38,10 @@ from werewolf.models import (
     ActionRequest,
     AgentResponse,
     Faction,
+    PlayerBelief,
     PlayerView,
     Role,
+    StrategyState,
     Visibility,
 )
 
@@ -900,6 +903,106 @@ def test_silent_model_statement_is_retried_but_people_may_still_pass() -> None:
     assert local._act(local._by_id["p1"], speak).text == ""  # noqa: SLF001
 
 
+def test_placeholder_model_statement_is_retried() -> None:
+    """Literal ellipses are failed generation, not meaningful public speech."""
+    controller = RecordingController(
+        [AgentResponse(text="..."), AgentResponse(text="我给出完整判断。")],
+    )
+    game = Game(
+        llm_seat_config(controller_retries=1, strict_controllers=True),
+        controllers={"p1": controller},
+        terminal=SilentTerminal(),
+    )
+    game.phase = "discussion"
+
+    response = game._act(  # noqa: SLF001
+        game._by_id["p1"],  # noqa: SLF001
+        ActionRequest(ActionKind.SPEAK, "发言", requires_text=True),
+    )
+
+    assert response.text == "我给出完整判断。"
+    assert "省略号" in controller.requests[1].retry_feedback
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [
+        "我先回顾票型，接下来最需要解释的是三号为什么突然改票，所以",
+        "这段发言已经很长，模型虽然关闭了JSON，但公开内容最终停在一个没有句末标点的词上"
+        * 2,
+        "我的判断还没有说完……",
+    ],
+)
+def test_likely_truncated_model_statement_is_retried(partial: str) -> None:
+    """Semantically cut text must be retried even after syntactically valid JSON."""
+    controller = RecordingController(
+        [AgentResponse(text=partial), AgentResponse(text="缩短后的完整判断。")],
+    )
+    game = Game(
+        llm_seat_config(controller_retries=1, strict_controllers=True),
+        controllers={"p1": controller},
+        terminal=SilentTerminal(),
+    )
+    game.phase = "discussion"
+
+    response = game._act(  # noqa: SLF001
+        game._by_id["p1"],  # noqa: SLF001
+        ActionRequest(ActionKind.SPEAK, "发言", requires_text=True),
+    )
+
+    assert response.text == "缩短后的完整判断。"
+    assert "句子中间结束" in controller.requests[1].retry_feedback
+
+
+def test_short_model_statement_without_terminal_punctuation_is_allowed() -> None:
+    """Concise natural replies should not be mistaken for output truncation."""
+    controller = RecordingController([AgentResponse(text="今天投3号")])
+    game = Game(
+        llm_seat_config(controller_retries=0, strict_controllers=True),
+        controllers={"p1": controller},
+        terminal=SilentTerminal(),
+    )
+    game.phase = "discussion"
+
+    response = game._act(  # noqa: SLF001
+        game._by_id["p1"],  # noqa: SLF001
+        ActionRequest(ActionKind.SPEAK, "发言", requires_text=True),
+    )
+
+    assert response.text == "今天投3号"
+
+
+def test_output_limit_retry_tells_model_to_shorten_its_answer() -> None:
+    """A cut-off provider response should get actionable retry feedback."""
+
+    class LimitedOnceController:
+        def __init__(self) -> None:
+            self.requests: list[ActionRequest] = []
+
+        def act(self, _view, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                msg = "output limit"
+                raise ProviderOutputLimitError(msg)
+            return AgentResponse(text="缩短后的完整发言。")
+
+    controller = LimitedOnceController()
+    game = Game(
+        llm_seat_config(controller_retries=1, strict_controllers=True),
+        controllers={"p1": controller},
+        terminal=SilentTerminal(),
+    )
+    game.phase = "discussion"
+
+    response = game._act(  # noqa: SLF001
+        game._by_id["p1"],  # noqa: SLF001
+        ActionRequest(ActionKind.SPEAK, "发言", requires_text=True),
+    )
+
+    assert response.text == "缩短后的完整发言。"
+    assert "token 上限截断" in controller.requests[1].retry_feedback
+
+
 def test_strict_mode_reports_a_silent_model_as_an_invalid_response() -> None:
     """An exhausted retry budget should expose a safe validation category."""
     game = Game(
@@ -1247,7 +1350,7 @@ def test_generated_config_uses_recommended_defaults_without_listing_them(
     assert config.checkpoint_path == "game_runs/private.checkpoint.json"
     assert config.public_transcript_path == "game_runs/public.log"
     assert config.parallel_llm_votes is True
-    assert config.max_parallel_llm_requests == 4
+    assert config.max_parallel_llm_requests == 2
     assert config.enable_tools is True
     assert config.max_tool_rounds == 2
     assert config.human_strategy_notes is False
@@ -1266,10 +1369,10 @@ def test_full_example_config_remains_available_for_advanced_options() -> None:
     assert config["checkpoint_path"] == "game_runs/private.checkpoint.json"
     assert config["roles"] is None
     assert config["rules"]["randomize_seating"] is True
-    assert config["providers"]["default"]["max_tokens"] == 2000
+    assert config["providers"]["default"]["max_tokens"] == 4000
     assert config["providers"]["default"]["stream"] is True
     assert config["providers"]["default"]["reasoning_effort"] == "high"
-    assert config["max_parallel_llm_requests"] == 4
+    assert config["max_parallel_llm_requests"] == 2
     assert config["enable_tools"] is True
     assert config["max_tool_rounds"] == 2
 
@@ -1467,7 +1570,26 @@ def test_checkpoint_replays_each_completed_controller_call(tmp_path) -> None:
     scripted = ScriptedController(
         {
             ActionKind.SPEAK: [
-                AgentResponse(text="已完成的发言", thought="已完成的私密判断"),
+                AgentResponse(
+                    text="已完成的发言",
+                    thought="已完成的私密判断",
+                    strategy=StrategyState(
+                        day=1,
+                        phase="discussion",
+                        beliefs=(
+                            PlayerBelief(
+                                player_id="p2",
+                                suspicion=72,
+                                confidence=65,
+                                evidence_sequences=(1,),
+                                rationale="阶段起点信息。",
+                            ),
+                        ),
+                        open_questions=("二号下一轮投谁？",),
+                        plan="继续观察二号。",
+                        counter_case="二号可能只是发言保守。",
+                    ),
+                ),
             ],
         },
     )
@@ -1505,6 +1627,7 @@ def test_checkpoint_replays_each_completed_controller_call(tmp_path) -> None:
     assert resumed._by_id["p1"].memory.thoughts[-1].text == (  # noqa: SLF001
         "已完成的私密判断"
     )
+    assert resumed._by_id["p1"].memory.strategy == response.strategy  # noqa: SLF001
     assert checkpoint.stat().st_mode & 0o777 == 0o600
 
 
@@ -1525,6 +1648,35 @@ def test_fresh_game_refuses_to_clobber_existing_outputs(tmp_path) -> None:
 
     assert checkpoint.read_text(encoding="utf-8") == '{"next_day": 3}'
     assert transcript.read_text(encoding="utf-8") == "existing public history\n"
+
+
+def test_checkpoint_round_trips_structured_private_strategy(tmp_path) -> None:
+    """A safe phase checkpoint should preserve the latest belief snapshot."""
+    checkpoint = tmp_path / "private.checkpoint.json"
+    config = replace(fixed_config(), checkpoint_path=str(checkpoint))
+    game = Game(config, terminal=SilentTerminal())
+    strategy = StrategyState(
+        day=2,
+        phase="vote",
+        beliefs=(
+            PlayerBelief(
+                player_id="p2",
+                suspicion=81,
+                confidence=74,
+                evidence_sequences=(3, 7),
+                rationale="两轮票型不一致。",
+            ),
+        ),
+        open_questions=("二号是否会再次改票？",),
+        plan="下一轮优先核对二号。",
+        counter_case="改票也可能来自新信息。",
+    )
+    game._by_id["p1"].memory.strategy = strategy  # noqa: SLF001
+    game._save_checkpoint(next_day=2, next_step="daytime")  # noqa: SLF001
+
+    resumed = Game(config, terminal=SilentTerminal(), resume_checkpoint=checkpoint)
+
+    assert resumed._by_id["p1"].memory.strategy == strategy  # noqa: SLF001
 
 
 def test_force_new_explicitly_allows_replacing_existing_outputs(tmp_path) -> None:

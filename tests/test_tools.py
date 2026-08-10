@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from werewolf.models import (
+    ActionKind,
+    ActionOption,
+    ActionRequest,
     Faction,
     MemoryEvent,
+    PlayerBelief,
     PlayerView,
     Role,
+    StrategyState,
     Thought,
     Visibility,
 )
@@ -71,6 +77,22 @@ def tool_view() -> PlayerView:
             ("p3", 3, "智能体3"),
         ),
         mechanical_context="最近一次胜负检查允许至多1名存活狼人。",
+        strategy=StrategyState(
+            day=1,
+            phase="vote",
+            beliefs=(
+                PlayerBelief(
+                    player_id="p3",
+                    suspicion=80,
+                    confidence=70,
+                    evidence_sequences=(1, 2),
+                    rationale="发言与票型均指向三号。",
+                ),
+            ),
+            open_questions=("二号为何持续跟票？",),
+            plan="复核三号声明后投票。",
+            counter_case="三号可能只是表达混乱的好人。",
+        ),
     )
 
 
@@ -94,6 +116,7 @@ def test_evidence_ledger_separates_claims_votes_and_private_facts() -> None:
     }
     assert "狼人侧" in ledger["private_visible_events"][0]["text"]
     assert ledger["private_strategy_notes"][0]["text"] == "下一轮重点核验3号。"
+    assert ledger["structured_strategy_state"]["beliefs"][0]["player_id"] == "p3"
 
 
 def test_history_search_respects_visibility_filters() -> None:
@@ -149,3 +172,94 @@ def test_tool_arguments_are_strict_and_fail_as_model_visible_json() -> None:
     assert extra["ok"] is False
     assert bad_player["ok"] is False
     assert "/etc/passwd" not in json.dumps(extra, ensure_ascii=False)
+
+
+def test_vote_analysis_tracks_coalitions_and_target_switches() -> None:
+    """Vote structure should be computed without inferring anyone's faction."""
+    view = replace(
+        tool_view(),
+        events=(
+            *tool_view().events,
+            MemoryEvent(
+                sequence=5,
+                day=2,
+                phase="vote",
+                text="公开投票结果：1号 真人玩家→2号 智能体2；2号 智能体2→3号 智能体3；3号 智能体3→2号 智能体2。",
+                visibility=Visibility.PUBLIC,
+            ),
+        ),
+    )
+
+    result = execute(PlayerToolbox(view), "get_vote_analysis", {})["result"]
+
+    assert result["target_switches_by_player"]["p1"] == 1
+    assert result["rounds"][-1]["coalitions"]["p2"] == ["p1", "p3"]
+    assert "confirmed faction" in result["interpretation_warning"]
+
+
+def test_claim_matrix_distinguishes_self_claims_and_denials() -> None:
+    """Public role language should remain explicitly unverified."""
+    view = replace(
+        tool_view(),
+        events=(
+            *tool_view().events,
+            MemoryEvent(
+                sequence=5,
+                day=2,
+                phase="discussion",
+                sender="3号 智能体3",
+                text="3号 智能体3：我是预言家，昨晚查了2号。",
+                visibility=Visibility.PUBLIC,
+            ),
+        ),
+    )
+
+    result = execute(PlayerToolbox(view), "get_claim_matrix", {})["result"]
+
+    assert result["claims_are_unverified"] is True
+    assert result["by_player"]["p3"][0]["role"] == "预言家"
+    assert result["by_player"]["p3"][0]["self_claim"] is True
+    denial = next(
+        claim for claim in result["by_player"]["p2"] if claim["role"] == "预言家"
+    )
+    assert denial["explicit_denial"] is True
+    assert denial["self_claim"] is False
+
+
+def test_action_review_checks_legality_evidence_and_counter_case() -> None:
+    """The final review should catch an illegal or unsupported draft."""
+    request = ActionRequest(
+        ActionKind.VOTE,
+        "投票",
+        (ActionOption("p2", "2号 智能体2"), ActionOption("p3", "3号 智能体3")),
+    )
+    toolbox = PlayerToolbox(tool_view(), request)
+
+    invalid = execute(
+        toolbox,
+        "review_action_draft",
+        {
+            "choice": None,
+            "text": "",
+            "evidence_sequences": [999],
+            "counter_case": "",
+            "plan": "",
+        },
+    )["result"]
+    valid = execute(
+        toolbox,
+        "review_action_draft",
+        {
+            "choice": "p3",
+            "text": "",
+            "evidence_sequences": [1, 2],
+            "counter_case": "三号可能只是判断失误。",
+            "plan": "若出现新查验则重新排序。",
+        },
+    )["result"]
+
+    assert invalid["ready"] is False
+    assert any("does not allow abstention" in issue for issue in invalid["issues"])
+    assert any("not visible" in issue for issue in invalid["issues"])
+    assert valid["ready"] is True
+    assert valid["issues"] == []

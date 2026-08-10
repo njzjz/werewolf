@@ -1514,7 +1514,7 @@ class ConfigurationTUI:
                     confirm_critical_actions=True,
                     human_strategy_notes=False,
                     parallel_llm_votes=True,
-                    max_parallel_llm_requests=4,
+                    max_parallel_llm_requests=2,
                     context_char_limit=24000,
                     enable_tools=True,
                     max_tool_rounds=2,
