@@ -10,6 +10,7 @@ import re
 import socket
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -79,6 +80,10 @@ AFFIRMATIVE_ANSWERS = frozenset(
         "同意",
     },
 )
+
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_SSE_EVENT_BYTES = 256 * 1024
+MAX_ASSEMBLED_TEXT_CHARS = 1_000_000
 
 
 def _safe_diagnostic_token(value: object, *, limit: int = 128) -> str | None:
@@ -879,10 +884,20 @@ class OpenAICompatibleClient:
         msg = "Malformed Responses API response"
         raise ProviderProtocolError(msg)
 
-    @staticmethod
-    def _http_error(exc: urllib.error.HTTPError) -> ProviderHTTPError:
+    @classmethod
+    def _http_error(
+        cls,
+        exc: urllib.error.HTTPError,
+        *,
+        deadline: float | None = None,
+    ) -> ProviderHTTPError:
         """Extract only structured, bounded metadata from a provider error."""
-        body = exc.read(65536).decode(errors="replace")
+        body_bytes = (
+            cls._read_bounded_body(exc, deadline)
+            if deadline is not None
+            else exc.read(65536)
+        )
+        body = body_bytes[:65536].decode(errors="replace")
         parsed: object = None
         with suppress(json.JSONDecodeError):
             parsed = json.loads(body)
@@ -956,14 +971,27 @@ class OpenAICompatibleClient:
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         request = self._request(payload)
+        deadline = time.monotonic() + self.config.timeout
         try:
             with self._opener().open(
                 request,
-                timeout=self.config.timeout,
+                timeout=self._remaining_timeout(deadline),
             ) as response:
-                return json.loads(response.read().decode())
+                body = self._read_bounded_body(response, deadline)
+                try:
+                    parsed = json.loads(body.decode())
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    msg = "Malformed JSON response from LLM API"
+                    raise ProviderProtocolError(msg) from exc
+                if not isinstance(parsed, dict):
+                    msg = "Malformed JSON response from LLM API"
+                    raise ProviderProtocolError(msg)
+                return parsed
         except urllib.error.HTTPError as exc:
-            raise self._http_error(exc) from exc
+            raise self._http_error(exc, deadline=deadline) from exc
+        except TimeoutError as exc:
+            msg = "LLM API request exceeded its total timeout"
+            raise ProviderProtocolError(msg) from exc
         except urllib.error.URLError as exc:
             msg = "Could not reach LLM API"
             raise ProviderProtocolError(msg) from exc
@@ -988,32 +1016,116 @@ class OpenAICompatibleClient:
     def _read_stream(self, stream_payload: dict[str, Any]) -> str:
         """Send one streaming request and assemble its assistant text."""
         request = self._request(stream_payload)
+        deadline = time.monotonic() + self.config.timeout
         try:
             with self._opener().open(
                 request,
-                timeout=self.config.timeout,
+                timeout=self._remaining_timeout(deadline),
             ) as response:
-                return self._stream_content(response)
+                return self._stream_content(response, deadline=deadline)
         except urllib.error.HTTPError as exc:
-            raise self._http_error(exc) from exc
+            raise self._http_error(exc, deadline=deadline) from exc
+        except TimeoutError as exc:
+            msg = "LLM API request exceeded its total timeout"
+            raise ProviderProtocolError(msg) from exc
         except urllib.error.URLError as exc:
             msg = "Could not reach LLM API"
             raise ProviderProtocolError(msg) from exc
 
-    def _stream_content(self, lines: Iterable[bytes]) -> str:
+    @staticmethod
+    def _remaining_timeout(deadline: float) -> float:
+        """Return the positive time left before a total request deadline."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            msg = "LLM API request exceeded its total timeout"
+            raise ProviderProtocolError(msg)
+        return remaining
+
+    @classmethod
+    def _set_stream_timeout(cls, source: object, deadline: float) -> None:
+        """Tighten the underlying urllib socket to the remaining deadline."""
+        remaining = cls._remaining_timeout(deadline)
+        socket_object = getattr(
+            getattr(getattr(source, "fp", None), "raw", None),
+            "_sock",
+            None,
+        )
+        if socket_object is not None:
+            socket_object.settimeout(remaining)
+
+    @classmethod
+    def _read_bounded_body(cls, response: object, deadline: float) -> bytes:
+        """Read a non-streaming body under total-time and byte limits."""
+        chunks: list[bytes] = []
+        total = 0
+        read_chunk = getattr(response, "read1", None)
+        if not callable(read_chunk):
+            read_chunk = getattr(response, "read")
+        while True:
+            cls._set_stream_timeout(response, deadline)
+            chunk = read_chunk(65536)
+            cls._remaining_timeout(deadline)
+            if not chunk:
+                return b"".join(chunks)
+            if not isinstance(chunk, bytes):
+                msg = "LLM API returned a non-byte response body"
+                raise ProviderProtocolError(msg)
+            total += len(chunk)
+            if total > MAX_RESPONSE_BYTES:
+                msg = "LLM API response body exceeded the size limit"
+                raise ProviderProtocolError(msg)
+            chunks.append(chunk)
+
+    @classmethod
+    def _iter_stream_lines(
+        cls,
+        source: Iterable[bytes],
+        deadline: float,
+    ) -> Iterable[bytes]:
+        """Yield bounded SSE lines while enforcing the total deadline."""
+        read_line = getattr(source, "readline", None)
+        if callable(read_line):
+            while True:
+                cls._set_stream_timeout(source, deadline)
+                raw_line = read_line(MAX_SSE_EVENT_BYTES + 1)
+                cls._remaining_timeout(deadline)
+                if not raw_line:
+                    return
+                if len(raw_line) > MAX_SSE_EVENT_BYTES:
+                    msg = "LLM streaming event exceeded the size limit"
+                    raise ProviderProtocolError(msg)
+                yield raw_line
+            return
+        for raw_line in source:
+            cls._remaining_timeout(deadline)
+            if len(raw_line) > MAX_SSE_EVENT_BYTES:
+                msg = "LLM streaming event exceeded the size limit"
+                raise ProviderProtocolError(msg)
+            yield raw_line
+
+    def _stream_content(
+        self,
+        lines: Iterable[bytes],
+        *,
+        deadline: float | None = None,
+    ) -> str:
         """Extract assistant text deltas from Responses or Chat SSE events."""
+        deadline = deadline or (time.monotonic() + self.config.timeout)
         parts: list[str] = []
         reasoning_parts: list[str] = []
+        assembled_chars = 0
         finish_reason: object = None
         completed_response: dict[str, Any] | None = None
         stream_usage: dict[str, Any] | None = None
-        for raw_line in lines:
+        for raw_line in self._iter_stream_lines(lines, deadline):
             line = raw_line.decode(errors="replace").strip()
             if not line.startswith("data:"):
                 continue
             data_text = line.removeprefix("data:").strip()
-            if not data_text or data_text == "[DONE]":
+            if not data_text:
                 continue
+            if data_text == "[DONE]":
+                break
             try:
                 event = json.loads(data_text)
             except json.JSONDecodeError as exc:
@@ -1036,11 +1148,19 @@ class OpenAICompatibleClient:
                 delta = event.get("delta")
                 if isinstance(delta, str):
                     parts.append(delta)
+                    assembled_chars += len(delta)
+                    if assembled_chars > MAX_ASSEMBLED_TEXT_CHARS:
+                        msg = "LLM streaming text exceeded the size limit"
+                        raise ProviderProtocolError(msg)
                 continue
             if event_type == "response.output_text.done" and not parts:
                 text = event.get("text")
                 if isinstance(text, str):
                     parts.append(text)
+                    assembled_chars += len(text)
+                    if assembled_chars > MAX_ASSEMBLED_TEXT_CHARS:
+                        msg = "LLM streaming text exceeded the size limit"
+                        raise ProviderProtocolError(msg)
                 continue
             if event_type == "response.completed":
                 response = event.get("response")
@@ -1057,11 +1177,16 @@ class OpenAICompatibleClient:
                 content = self._content_text(delta.get("content"))
                 if content:
                     parts.append(content)
+                    assembled_chars += len(content)
                 reasoning_content = self._content_text(
                     delta.get("reasoning_content"),
                 )
                 if reasoning_content:
                     reasoning_parts.append(reasoning_content)
+                    assembled_chars += len(reasoning_content)
+                if assembled_chars > MAX_ASSEMBLED_TEXT_CHARS:
+                    msg = "LLM streaming text exceeded the size limit"
+                    raise ProviderProtocolError(msg)
         usage_recorded = (
             self._record_usage(completed_response)
             if completed_response is not None

@@ -1665,7 +1665,9 @@ class Game:
                 heartbeat.join(timeout=1)
                 self.terminal.clear_transient_progress()
             if executor is not None:
-                executor.shutdown(wait=True)
+                for future in futures.values():
+                    future.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
         return [response for response in responses if response is not None]
 
     def _parallel_vote_heartbeat(

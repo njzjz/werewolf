@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import time
 import urllib.error
 from dataclasses import replace
 from email.message import Message
@@ -631,6 +632,61 @@ def test_chat_stream_requests_usage_and_retries_without_it_when_rejected() -> No
     assert sent[0]["stream"] is True
     assert sent[0]["stream_options"] == {"include_usage": True}
     assert "stream_options" not in sent[1]
+
+
+def test_sse_done_terminates_without_waiting_for_connection_close() -> None:
+    """The protocol terminator should stop before a provider's trailing bytes."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+    )
+
+    def lines():
+        yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n'
+        yield b"data: [DONE]\n"
+        pytest.fail("the client read beyond the SSE terminator")
+
+    assert client._stream_content(lines()) == "done"  # noqa: SLF001
+
+
+def test_stream_heartbeats_cannot_extend_the_total_deadline() -> None:
+    """Frequent bytes may avoid an inactivity timeout but not the hard deadline."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(
+            base_url="https://example.invalid/v1",
+            model="test",
+            timeout=0.05,
+        ),
+    )
+
+    def heartbeats():
+        while True:
+            time.sleep(0.02)
+            yield b": keepalive\n"
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="total timeout"):
+        client._stream_content(heartbeats())  # noqa: SLF001
+
+    assert time.monotonic() - started < 0.2
+
+
+def test_non_streaming_response_body_has_a_hard_size_limit() -> None:
+    """A provider cannot make the client accumulate an unbounded JSON body."""
+
+    class OversizedBody:
+        def __init__(self) -> None:
+            self.remaining = agents_module.MAX_RESPONSE_BYTES + 1
+
+        def read1(self, size: int) -> bytes:
+            count = min(size, self.remaining)
+            self.remaining -= count
+            return b"x" * count
+
+    with pytest.raises(RuntimeError, match="size limit"):
+        OpenAICompatibleClient._read_bounded_body(  # noqa: SLF001
+            OversizedBody(),
+            time.monotonic() + 1,
+        )
 
 
 def test_history_trimming_advances_in_cache_friendly_chunks() -> None:

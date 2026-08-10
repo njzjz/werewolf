@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
@@ -119,6 +120,18 @@ class BarrierVoteController:
     def act(self, _view, request):
         """Wait for the peer vote before choosing the first legal target."""
         self.barrier.wait()
+        return AgentResponse(choice=request.options[0].value)
+
+
+class BlockingVoteController:
+    """Hold one parallel vote until a test confirms failure handling returned."""
+
+    def __init__(self, release: threading.Event) -> None:
+        self.release = release
+
+    def act(self, _view, request):
+        """Wait for release, then return a legal vote so the worker can exit."""
+        self.release.wait(timeout=2)
         return AgentResponse(choice=request.options[0].value)
 
 
@@ -916,6 +929,38 @@ def test_llm_public_votes_are_collected_in_parallel() -> None:
 
     assert list(votes) == [f"p{index}" for index in range(1, 7)]
     assert all(target is not None for target in votes.values())
+
+
+def test_parallel_vote_failure_does_not_wait_for_another_stalled_future() -> None:
+    """Strict failure handling must return without an unbounded executor join."""
+    provider = LLMProviderConfig(base_url="https://example.invalid/v1", model="test")
+    base = fixed_config()
+    config = replace(
+        base,
+        players=tuple(
+            replace(player, controller="llm", provider="test")
+            for player in base.players
+        ),
+        providers={"test": provider},
+        parallel_llm_votes=True,
+        strict_controllers=True,
+    )
+    release = threading.Event()
+    controllers = {
+        "p1": FailingController(),
+        "p2": BlockingVoteController(release),
+        **{f"p{index}": ScriptedController() for index in range(3, 7)},
+    }
+    game = Game(config, controllers=controllers, terminal=SilentTerminal())
+    game.phase = "vote"
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(RuntimeError):
+            game._collect_votes(None)  # noqa: SLF001
+        assert time.monotonic() - started < 0.5
+    finally:
+        release.set()
 
 
 def test_parallel_votes_remain_replayable_from_checkpoint(tmp_path) -> None:
