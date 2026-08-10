@@ -6,7 +6,7 @@
   "memory_directory": "game_memories/movie_mad_land",
   "players": [
     {
-      "name": "你",
+      "name": "真人玩家",
       "controller": "human",
       "skills": ["logic", "social", "memory"]
     },

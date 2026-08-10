@@ -28,6 +28,7 @@ class Role(str, Enum):
 
     VILLAGER = "villager"
     WEREWOLF = "werewolf"
+    POLICE = "police"
     SEER = "seer"
     WITCH = "witch"
     HUNTER = "hunter"
@@ -59,6 +60,7 @@ ROLE_NAMES: dict[str, dict[Role, str]] = {
     "zh-CN": {
         Role.VILLAGER: "平民",
         Role.WEREWOLF: "狼人",
+        Role.POLICE: "警察",
         Role.SEER: "预言家",
         Role.WITCH: "女巫",
         Role.HUNTER: "猎人",
@@ -72,6 +74,7 @@ ROLE_NAMES: dict[str, dict[Role, str]] = {
     "en": {
         Role.VILLAGER: "Villager",
         Role.WEREWOLF: "Werewolf",
+        Role.POLICE: "Police",
         Role.SEER: "Seer",
         Role.WITCH: "Witch",
         Role.HUNTER: "Hunter",
@@ -88,6 +91,7 @@ ROLE_DESCRIPTIONS: dict[str, dict[Role, str]] = {
     "zh-CN": {
         Role.VILLAGER: "白天分析发言与投票，找出全部狼人。",
         Role.WEREWOLF: "夜间与队友私聊并共同袭击一名好人，白天隐藏身份。",
+        Role.POLICE: "夜间与警察队友协作查证一名玩家，带领平民找出杀手。",
         Role.SEER: "每晚查验一名存活玩家，得知其显示为狼人侧还是村人侧。",
         Role.WITCH: "整局各有一瓶解药和毒药；默认同一夜只能使用一瓶。",
         Role.HUNTER: "死亡时可开枪带走一名存活玩家，但被女巫毒死时不能开枪。",
@@ -101,6 +105,7 @@ ROLE_DESCRIPTIONS: dict[str, dict[Role, str]] = {
     "en": {
         Role.VILLAGER: "Analyze discussion and votes to eliminate every werewolf.",
         Role.WEREWOLF: "Chat privately and attack at night while hiding by day.",
+        Role.POLICE: "Coordinate with the police team to investigate one player each night and lead civilians to the killers.",
         Role.SEER: "Inspect one living player each night to learn whether they appear werewolf-side or village-side.",
         Role.WITCH: "Has one antidote and one poison; only one may be used per night by default.",
         Role.HUNTER: "May shoot one living player when killed, except when poisoned by the Witch.",
@@ -139,6 +144,7 @@ class Visibility(str, Enum):
     PUBLIC = "public"
     PRIVATE = "private"
     WEREWOLF = "werewolf"
+    POLICE = "police"
     LOVERS = "lovers"
 
 
@@ -257,6 +263,8 @@ class PlayerView:
     seat_players: tuple[tuple[str, int, str], ...] = ()
     mechanical_context: str = ""
     strategy: StrategyState = field(default_factory=StrategyState)
+    game_name: str = "狼人杀"
+    adversary_name: str = "狼人"
 
     @property
     def own_label(self) -> str:
@@ -272,6 +280,8 @@ class ActionKind(str, Enum):
     TEAM_CHAT = "team_chat"
     VOTE = "vote"
     WOLF_KILL = "wolf_kill"
+    GHOST_GUESS = "ghost_guess"
+    POLICE_INSPECT = "police_inspect"
     SEER_INSPECT = "seer_inspect"
     WITCH_SAVE = "witch_save"
     WITCH_POISON = "witch_poison"

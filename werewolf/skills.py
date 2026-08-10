@@ -41,6 +41,15 @@ ROLE_SKILLS: dict[Role, Skill] = {
             "是否能保住其余狼人，不要为救一名队友让整组票型同时暴露。"
         ),
     ),
+    Role.POLICE: Skill(
+        name="role_police",
+        description="警察团队查证",
+        instructions=(
+            "夜间与警察队友共享判断并共同选择一名非警察玩家查证；法官结果只确认杀手或非杀手，"
+            "不得夸大为具体身份。维护逐夜查证表，协调谁在白天公开、谁继续隐藏。拿到杀手查证、"
+            "警队即将被屠光或错误归票将决定胜负时，应及时给出完整结果链；不要泄露警聊原文。"
+        ),
+    ),
     Role.SEER: Skill(
         name="role_seer",
         description="预言家信息管理",
@@ -170,7 +179,142 @@ MAD_LAND_BOARD_SKILL = Skill(
     ),
 )
 
+KILLER_BOARD_SKILL = Skill(
+    name="board_killer",
+    description="杀人游戏警版规则",
+    instructions=(
+        "本局是杀人游戏警版：两名杀手夜间协作行凶，两名警察夜间协作查证，四名平民没有夜间能力。"
+        "好人放逐全部杀手获胜；杀手只要屠光全部警察或全部平民即可获胜。死亡会公开身份。"
+        "发言和投票必须围绕查证链、警察公开时机、杀手找警动机和屠边风险展开，不要套用女巫、"
+        "猎人等狼人杀牌组中不存在的能力。"
+    ),
+)
+
+GHOST_SIMILAR_BOARD_SKILL = Skill(
+    name="board_ghost_similar",
+    description="捉鬼近义词规则",
+    instructions=(
+        "本局是捉鬼猜词：六名水民与两名幽灵分别拿到一组相关但不同的私密词牌，没有夜间行动。"
+        "每轮用特征、场景或关系描述自己的词，但绝不能直接说出词牌，也不要逐字引用私密提示。"
+        "结合他人描述寻找词义偏差；幽灵存活到只剩一名水民即获胜，水民放逐全部幽灵获胜。"
+        "死亡会公开身份，因此每轮票型和翻牌结果都是下一轮的主要证据。"
+    ),
+)
+
+GHOST_BLANK_BOARD_SKILL = Skill(
+    name="board_ghost_blank",
+    description="捉鬼无词规则",
+    instructions=(
+        "本局是捉鬼无词版：六名水民拿到同一个私密词牌，两名幽灵明确知道自己没有词、彼此知道队友，"
+        "且没有夜间行动。"
+        "水民每轮用特征、场景或关系描述词牌，但绝不能直接说出词；幽灵必须从公开描述中逐步猜词，"
+        "给出兼容多数描述但不过度具体的伪装发言。幽灵存活到只剩一名水民即获胜，水民放逐全部幽灵"
+        "获胜；但无词幽灵被投出时各有一次猜水民词牌的机会，猜中立即由幽灵队获胜。死亡会公开身份，"
+        "因此翻牌与每轮描述偏差是下一轮的主要证据。"
+    ),
+)
+
+MODE_ROLE_SKILLS: dict[str, dict[Role, Skill]] = {
+    "killer": {
+        Role.WEREWOLF: Skill(
+            name="role_werewolf",
+            description="杀手团队策略",
+            instructions=(
+                "夜间与杀手队友协调行凶目标、白天站位和必要的身份声明，优先寻找并清除警察，"
+                "同时判断屠警察边与屠平民边哪条路线更短。队友不要使用相同措辞、机械同票或"
+                "连续无依据强保；也绝不能泄露杀手名单和私聊。死亡会翻牌，因此每次切割、冲票"
+                "和找警行为都会进入后续公开证据链。"
+            ),
+        ),
+        Role.VILLAGER: Skill(
+            name="role_villager",
+            description="平民职责",
+            instructions=(
+                "你没有夜间能力。围绕公开发言、票型、死亡翻牌和警察公布的完整查证链找出杀手；"
+                "警察声明在公开前仍只是声明，不能把单人起跳自动当成法官确认。保护警察边的同时"
+                "也要记住杀手屠光平民即可获胜，不要让平民连续成为低成本放逐或行凶目标。"
+            ),
+        ),
+    },
+    "ghost_similar": {
+        Role.WEREWOLF: Skill(
+            name="role_werewolf",
+            description="近义词幽灵伪装",
+            instructions=(
+                "你拿到与水民词牌相关但不同的词，不知道另一名幽灵是谁，也没有私聊或夜间行动。"
+                "描述自己词牌真实具有的特征，并寻找他人描述中稳定的词义分叉；不要照搬某名玩家"
+                "的表达、直接说出词牌，或暗示自己知道幽灵队友。投票时兼顾自保和描述差异，避免"
+                "仅凭与你同词义的人就武断认定阵营。"
+            ),
+        ),
+        Role.VILLAGER: Skill(
+            name="role_villager",
+            description="近义词水民判断",
+            instructions=(
+                "你与其他水民拿到同一个词。用真实但不过度直白的特征、场景或关系描述它，比较"
+                "不同玩家是否持续围绕另一个相近概念；不要直接说词，也不要因单句宽泛描述就定罪。"
+                "结合多轮描述、投票和死亡翻牌逐步缩小两名幽灵的位置。"
+            ),
+        ),
+    },
+    "ghost_blank": {
+        Role.WEREWOLF: Skill(
+            name="role_werewolf",
+            description="无词幽灵猜词",
+            instructions=(
+                "你明确没有词牌，开局知道另一名无词幽灵是谁，但没有私聊或夜间行动。根据已经公开的"
+                "多个独立描述持续推断水民词牌，发言要兼容当前最可能的概念，但保留足够宽度避免"
+                "猜错后自相矛盾。不要声称法官给了你一个词、直接说出猜测词，或把与你描述相近的"
+                "水民当成额外队友。被投出时你有一次公开猜词机会，只提交一个最可能的完整词牌；"
+                "猜中会让幽灵队立即获胜。"
+            ),
+        ),
+        Role.VILLAGER: Skill(
+            name="role_villager",
+            description="无词版水民判断",
+            instructions=(
+                "你与其他水民拿到同一个词。给出真实但不过度直白、且能与前人形成区分度的新描述；"
+                "不要直接说词。无词幽灵会从公开线索逐步猜词，因此应综合首轮信息量、后续跟随痕迹、"
+                "投票和死亡翻牌判断，而不是只比较某一句描述是否正确。"
+            ),
+        ),
+    },
+}
+
+KILLER_GAMECRAFT_SKILL = Skill(
+    name="global_gamecraft",
+    description="杀人游戏证据与终局管理",
+    instructions=(
+        "按证据强度决策：法官公开的死亡翻牌和自己收到的真实查证高于他人声明，声明高于行为推断；"
+        "行凶目标、跟票和发言表现都不能单独确认身份。每轮维护杀手、警察、平民三类候选与至少一个"
+        "反方解释，投票要与公开排序一致。胜负只看屠边：杀手清零则警民胜，警察或平民任一类清零则"
+        "杀手胜；不能因杀手人数达到其余人数就提前终局。私密队伍信息只能转化成公开可解释的判断，"
+        "不能泄露原文。"
+    ),
+)
+
+GHOST_GAMECRAFT_SKILL = Skill(
+    name="global_gamecraft",
+    description="捉鬼描述与词义证据",
+    instructions=(
+        "本局没有夜晚或身份能力，所有判断只来自私密词牌、公开描述、票型和死亡翻牌。区分法官确认、"
+        "自己拿到的词、他人描述与自己的语义推断；描述宽泛、跟随多数或单次同票都不能直接确认身份。"
+        "每轮比较玩家持续指向的概念、首轮信息量、后续是否追随已出现线索，并保留至少一个反方解释。"
+        "水民必须避免直接泄词；幽灵只能使用自己获权看到的信息。幽灵存活到只剩一名水民才触发生存胜利，"
+        "2 鬼 2 水民仍须继续。"
+    ),
+)
+
+MODE_GLOBAL_SKILLS: dict[str, Skill] = {
+    "killer": KILLER_GAMECRAFT_SKILL,
+    "ghost_similar": GHOST_GAMECRAFT_SKILL,
+    "ghost_blank": GHOST_GAMECRAFT_SKILL,
+}
+
 PRESET_SKILLS: dict[str, Skill] = {
+    "killer": KILLER_BOARD_SKILL,
+    "ghost_similar": GHOST_SIMILAR_BOARD_SKILL,
+    "ghost_blank": GHOST_BLANK_BOARD_SKILL,
     "movie_mad_land": MAD_LAND_BOARD_SKILL,
 }
 
@@ -226,6 +370,25 @@ def resolve_player_skills(role: Role, names: list[str]) -> tuple[Skill, ...]:
     for skill in ordered:
         unique.setdefault(skill.name, skill)
     return tuple(unique.values())
+
+
+def apply_mode_role_skill(
+    skills: tuple[Skill, ...],
+    role_preset: str,
+    role: Role,
+) -> tuple[Skill, ...]:
+    """Replace generic guidance when a preset changes global or role rules."""
+    global_replacement = MODE_GLOBAL_SKILLS.get(role_preset)
+    role_replacement = MODE_ROLE_SKILLS.get(role_preset, {}).get(role)
+    role_skill_name = f"role_{role.value}"
+    return tuple(
+        global_replacement
+        if skill.name == "global_gamecraft" and global_replacement is not None
+        else role_replacement
+        if skill.name == role_skill_name and role_replacement is not None
+        else skill
+        for skill in skills
+    )
 
 
 def add_lover_skill(skills: tuple[Skill, ...]) -> tuple[Skill, ...]:

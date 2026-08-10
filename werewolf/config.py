@@ -25,6 +25,9 @@ SUPPORTED_WIRE_APIS = {"chat", "responses"}
 SUPPORTED_PROMPT_CACHE_RETENTIONS = {"in-memory", "24h"}
 ROLE_PRESET_SIZES: dict[str, int | None] = {
     "classic": None,
+    "killer": 8,
+    "ghost_similar": 8,
+    "ghost_blank": 8,
     "movie_basic": 10,
     "movie_crazy_fox": 12,
     "movie_prison_break": 12,

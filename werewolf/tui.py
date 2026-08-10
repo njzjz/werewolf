@@ -46,6 +46,9 @@ _RESET = "\x1b[0m"
 
 _PRESET_LABELS = {
     "classic": "经典狼人杀",
+    "killer": "杀人游戏 · 警版",
+    "ghost_similar": "捉鬼 · 近义词版",
+    "ghost_blank": "捉鬼 · 无词版",
     "movie_basic": "电影 · BASIC",
     "movie_crazy_fox": "电影 · CRAZY FOX",
     "movie_prison_break": "电影 · PRISON BREAK",
@@ -55,6 +58,9 @@ _PRESET_LABELS = {
 
 _PRESET_DESCRIPTIONS = {
     "classic": "6–16 人，按人数自动生成平衡牌组",
+    "killer": "8 人：2 杀手、2 警察、4 平民，夜间行凶与查证",
+    "ghost_similar": "8 人：2 幽灵拿相关词，6 水民拿公共词，只走白天",
+    "ghost_blank": "8 人：2 名互认幽灵无词可猜，6 水民拿公共词，只走白天",
     "movie_basic": "10 人：基础电影牌组",
     "movie_crazy_fox": "12 人：加入灵媒、守卫与妖狐",
     "movie_prison_break": "12 人：加入共有者与狂人",
