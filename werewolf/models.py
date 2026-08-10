@@ -317,7 +317,8 @@ class AgentResponse:
     ``thought`` and ``note`` are always private. Controllers normally leave the
     fallback fields at their defaults; the judge sets them only when a failed
     controller action has been replaced by an explicitly configured safe
-    fallback.
+    fallback. ``choice_provided`` distinguishes an explicit ``null`` abstention
+    from an LLM response that omitted the required ``choice`` field entirely.
     """
 
     choice: str | None = None
@@ -328,3 +329,4 @@ class AgentResponse:
     used_fallback: bool = False
     fallback_error: str = ""
     attempts: int = 1
+    choice_provided: bool = True

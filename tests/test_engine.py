@@ -875,6 +875,35 @@ def test_illegal_llm_choice_is_retried_with_a_judge_explanation() -> None:
     assert game._controller_metrics.retries == 1  # noqa: SLF001
 
 
+def test_omitted_llm_choice_is_retried_before_explicit_abstention() -> None:
+    """A missing field must not silently become a legal abstention."""
+    controller = RecordingController(
+        [AgentResponse(choice_provided=False), AgentResponse(choice=None)],
+    )
+    game = Game(
+        llm_seat_config(controller_retries=1, strict_controllers=True),
+        controllers={"p1": controller},
+        terminal=SilentTerminal(),
+    )
+    game.phase = "vote"
+
+    response = game._act(  # noqa: SLF001
+        game._by_id["p1"],  # noqa: SLF001
+        ActionRequest(
+            ActionKind.VOTE,
+            "投票",
+            (ActionOption("p3", "3号 玩家3"),),
+            allow_abstain=True,
+        ),
+    )
+
+    assert response.choice is None
+    assert response.choice_provided is True
+    assert "缺少 choice 字段" in controller.requests[1].retry_feedback
+    assert "choice: null" in controller.requests[1].retry_feedback
+    assert game._controller_metrics.retries == 1  # noqa: SLF001
+
+
 def test_silent_model_statement_is_retried_but_people_may_still_pass() -> None:
     """An empty model answer is a format failure; a human or bot may stay quiet."""
     controller = RecordingController(
