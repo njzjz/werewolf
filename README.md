@@ -99,7 +99,7 @@ werewolf play
 
 如果主持人希望指定个别身份，只需在对应玩家上增加 `"fixed_role": "seer"`；其余玩家继续从剩余牌堆随机抽取。`werewolf init --full` 可生成包含全部桌规、provider 和运行选项的参考模板。
 
-恢复中止对局使用 `werewolf play --resume game_runs/private.checkpoint.json`。每次控制器成功返回后都会写入动作日志；恢复时只重新请求第一个未完成动作。
+恢复中止对局使用 `werewolf play --resume game_runs/private.checkpoint.json`。每次控制器成功返回后都会写入动作日志；恢复时只重新请求第一个未完成动作。为避免误删恢复点或公开日志，新开局发现已有输出时会拒绝启动；只有明确放弃旧局时才使用 `werewolf play --force-new`。
 
 Provider 字段、Prompt Caching、真人终端、观战、恢复点和记忆导出见 [配置与运行](docs/configuration.md)。
 

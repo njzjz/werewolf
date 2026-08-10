@@ -201,6 +201,7 @@ class Game:
         controllers: dict[str, Controller] | None = None,
         terminal: Terminal | None = None,
         resume_checkpoint: str | Path | None = None,
+        force_new: bool = False,
     ) -> None:
         validate_config(config)
         self.config = config
@@ -212,15 +213,17 @@ class Game:
             None if config.seed is None else f"werewolf-discussion:{config.seed}"
         )
         self._discussion_rng = random.Random(discussion_seed)  # noqa: S311
-        self.terminal = terminal or Terminal(
-            clear_screen=config.clear_screen,
-            transcript_path=config.public_transcript_path,
-            reset_transcript=resume_checkpoint is None,
-        )
         self._checkpoint_path = (
             Path(resume_checkpoint or config.checkpoint_path)
             if resume_checkpoint or config.checkpoint_path
             else None
+        )
+        if resume_checkpoint is None and not force_new:
+            self._refuse_existing_outputs()
+        self.terminal = terminal or Terminal(
+            clear_screen=config.clear_screen,
+            transcript_path=config.public_transcript_path,
+            reset_transcript=resume_checkpoint is None,
         )
         self._resume_day: int | None = None
         self._resume_step: str | None = None
@@ -274,6 +277,27 @@ class Game:
         self.boundary = InformationBoundary(self.players)
         if resume_checkpoint is not None:
             self._load_checkpoint(Path(resume_checkpoint))
+
+    def _refuse_existing_outputs(self) -> None:
+        """Fail before a fresh run can overwrite artifacts owned by another game."""
+        occupied: list[Path] = []
+        for value in (
+            self.config.checkpoint_path,
+            self.config.public_transcript_path,
+        ):
+            if value is not None and Path(value).exists():
+                occupied.append(Path(value))
+        if self.config.memory_directory is not None:
+            memory_directory = Path(self.config.memory_directory)
+            if memory_directory.exists() and any(memory_directory.iterdir()):
+                occupied.append(memory_directory)
+        if occupied:
+            paths = ", ".join(str(path) for path in occupied)
+            msg = (
+                f"Fresh game outputs already exist: {paths}. Resume the checkpoint "
+                "or pass --force-new to replace this run's artifacts."
+            )
+            raise FileExistsError(msg)
 
     def _config_signature(self) -> dict[str, object]:
         """Return non-secret configuration fields that must match on resume."""

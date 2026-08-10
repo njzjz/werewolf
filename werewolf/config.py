@@ -364,6 +364,21 @@ def validate_config(config: GameConfig) -> None:
     if config.controller_retries < 0:
         msg = "controller_retries cannot be negative"
         raise ValueError(msg)
+    outputs = {
+        label: Path(value).resolve()
+        for label, value in (
+            ("checkpoint_path", config.checkpoint_path),
+            ("public_transcript_path", config.public_transcript_path),
+            ("memory_directory", config.memory_directory),
+        )
+        if value is not None
+    }
+    if len(set(outputs.values())) != len(outputs):
+        collisions = ", ".join(
+            f"{label}={path}" for label, path in outputs.items()
+        )
+        msg = f"Game output paths must be distinct after resolution: {collisions}"
+        raise ValueError(msg)
 
 
 def _validate_role_set(roles: tuple[Role, ...], *, label: str) -> None:

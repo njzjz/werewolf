@@ -13,6 +13,13 @@ def test_play_accepts_a_concise_positional_config_path() -> None:
     assert args.config_option is None
 
 
+def test_play_requires_an_explicit_flag_to_replace_an_old_run() -> None:
+    """The destructive fresh-run override should be visible at the CLI boundary."""
+    args = build_parser().parse_args(["play", "custom.json", "--force-new"])
+
+    assert args.force_new is True
+
+
 def test_init_can_request_the_exhaustive_reference_template() -> None:
     """The noisy full schema should remain an explicit advanced option."""
     args = build_parser().parse_args(["init", "custom.json", "--full"])

@@ -98,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="从指定私密恢复点继续游戏",
     )
     play_parser.add_argument(
+        "--force-new",
+        action="store_true",
+        help="明确放弃已有恢复点和输出文件并开始新对局",
+    )
+    play_parser.add_argument(
         "--strategy-notes",
         action="store_true",
         help="每次真人行动后询问可选的私密策略笔记",
@@ -180,8 +185,15 @@ def main(argv: list[str] | None = None) -> None:
             if args.sequential_votes:
                 config = replace(config, parallel_llm_votes=False)
             resume_checkpoint = args.resume
+            if resume_checkpoint and args.force_new:
+                msg = "--resume 与 --force-new 不能同时使用"
+                raise ValueError(msg)
             active_checkpoint = resume_checkpoint or config.checkpoint_path
-        result = Game(config, resume_checkpoint=resume_checkpoint).run()
+        result = Game(
+            config,
+            resume_checkpoint=resume_checkpoint,
+            force_new=(args.command == "play" and args.force_new),
+        ).run()
         winner = result.winner.value if result.winner else "draw"
         duration = f"{result.duration_seconds:.1f}"
         seat_labels = dict(result.seat_labels)

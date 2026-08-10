@@ -1179,6 +1179,52 @@ def test_checkpoint_replays_each_completed_controller_call(tmp_path) -> None:
     assert checkpoint.stat().st_mode & 0o777 == 0o600
 
 
+def test_fresh_game_refuses_to_clobber_existing_outputs(tmp_path) -> None:
+    """A typo that omits --resume must preserve the existing recovery point."""
+    checkpoint = tmp_path / "private.checkpoint.json"
+    transcript = tmp_path / "public.log"
+    checkpoint.write_text('{"next_day": 3}', encoding="utf-8")
+    transcript.write_text("existing public history\n", encoding="utf-8")
+    config = replace(
+        fixed_config(),
+        checkpoint_path=str(checkpoint),
+        public_transcript_path=str(transcript),
+    )
+
+    with pytest.raises(FileExistsError, match="--force-new"):
+        Game(config, terminal=SilentTerminal())
+
+    assert checkpoint.read_text(encoding="utf-8") == '{"next_day": 3}'
+    assert transcript.read_text(encoding="utf-8") == "existing public history\n"
+
+
+def test_force_new_explicitly_allows_replacing_existing_outputs(tmp_path) -> None:
+    """The destructive override should permit a deliberate fresh checkpoint."""
+    checkpoint = tmp_path / "private.checkpoint.json"
+    checkpoint.write_text('{"next_day": 3}', encoding="utf-8")
+    config = replace(fixed_config(), checkpoint_path=str(checkpoint))
+
+    game = Game(config, terminal=SilentTerminal(), force_new=True)
+    game._save_checkpoint(next_day=0, next_step="setup")  # noqa: SLF001
+
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert payload["next_day"] == 0
+    assert payload["next_step"] == "setup"
+
+
+def test_output_paths_must_be_distinct_after_resolution(tmp_path) -> None:
+    """A checkpoint and transcript cannot share one destructive file path."""
+    shared = tmp_path / "shared.json"
+    config = replace(
+        fixed_config(),
+        checkpoint_path=str(shared),
+        public_transcript_path=str(tmp_path / "." / "shared.json"),
+    )
+
+    with pytest.raises(ValueError, match="must be distinct"):
+        Game(config, terminal=SilentTerminal())
+
+
 def test_checkpoint_replay_restores_bot_rng_consumption(tmp_path) -> None:
     """Skipping a journaled Bot call must still advance the shared RNG state."""
     checkpoint = tmp_path / "private.checkpoint.json"
