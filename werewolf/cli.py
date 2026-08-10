@@ -8,7 +8,13 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from .config import ROLE_PRESET_SIZES, demo_config, load_config, write_example_config
+from .config import (
+    ROLE_PRESET_SIZES,
+    GameConfig,
+    demo_config,
+    load_config,
+    write_example_config,
+)
 from .engine import Game
 from .rendering import sanitize_rendered_text
 from .tui import run_config_tui
@@ -42,6 +48,42 @@ def _validate_play_modes(resume_checkpoint: str | None, force_new: bool) -> None
     if resume_checkpoint and force_new:
         msg = "--resume 与 --force-new 不能同时使用"
         raise ValueError(msg)
+
+
+def _validate_provider_credentials(config: GameConfig) -> None:
+    """Fail before creating a match when a used provider environment key is absent.
+
+    Provider keys remain lazily resolved by the HTTP client so local unauthenticated
+    endpoints keep working. An explicitly configured environment variable, however,
+    is an operator requirement and should be checked before roles, logs, or a fresh
+    checkpoint are created.
+    """
+    used_providers = sorted(
+        {
+            player.provider
+            for player in config.players
+            if player.controller == "llm" and player.provider is not None
+        },
+    )
+    for name in used_providers:
+        provider = config.providers[name]
+        if provider.api_key_env is None:
+            continue
+        try:
+            provider.resolved_api_key()
+        except ValueError:
+            if config.language == "en":
+                msg = (
+                    f"Provider {name!r} requires environment variable "
+                    f"{provider.api_key_env!r}. Set it in this terminal before "
+                    "starting or resuming the game."
+                )
+            else:
+                msg = (
+                    f"Provider {name!r} 需要环境变量 {provider.api_key_env!r}；"
+                    "请先在当前终端设置该变量，再开始或恢复游戏。"
+                )
+            raise ValueError(msg) from None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -256,6 +298,7 @@ def main(argv: list[str] | None = None) -> None:
             resume_checkpoint = args.resume
             _validate_play_modes(resume_checkpoint, args.force_new)
             active_checkpoint = resume_checkpoint or config.checkpoint_path
+        _validate_provider_credentials(config)
         result = Game(
             config,
             resume_checkpoint=resume_checkpoint,
