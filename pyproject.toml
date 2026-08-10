@@ -58,6 +58,7 @@ select = [
 ignore = [
     "PLR0912",
     "PLR0913",
+    "PLR0917",
     "PLR0915",
     "PLR2004",
     "FBT001",
@@ -70,6 +71,7 @@ ignore = [
     "E501",
     "RUF001", # Chinese terminal copy intentionally uses full-width punctuation.
     "T201", # This application is intentionally terminal-first.
+    "CPY001", # Project licensing is declared centrally in LICENSE and metadata.
 ]
 
 [tool.ruff.lint.pydocstyle]

@@ -11,6 +11,7 @@ from pathlib import Path
 from .config import ROLE_PRESET_SIZES, demo_config, load_config, write_example_config
 from .engine import Game
 from .rendering import sanitize_rendered_text
+from .tui import run_config_tui
 
 
 def _print_resume_hint(active_checkpoint: str | None, config_path: str) -> None:
@@ -49,7 +50,24 @@ def build_parser() -> argparse.ArgumentParser:
         prog="werewolf",
         description="纯终端的真人/LLM 狼人杀游戏",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
+
+    configure_parser = subparsers.add_parser(
+        "configure",
+        aliases=["config", "setup"],
+        help="通过 TUI 创建或编辑配置",
+    )
+    configure_parser.add_argument(
+        "path",
+        nargs="?",
+        default="werewolf.json",
+        help="要创建或编辑的 JSON 配置路径",
+    )
+    configure_parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="关闭 TUI 彩色样式",
+    )
 
     init_parser = subparsers.add_parser("init", help="生成一份 JSON 配置模板")
     init_parser.add_argument("path", nargs="?", default="werewolf.json")
@@ -160,13 +178,40 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     """Execute a CLI subcommand and provide concise terminal errors."""
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command is None:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            args.command = "configure"
+            args.path = "werewolf.json"
+            args.no_color = False
+        else:
+            parser.print_help()
+            return
     resume_checkpoint: str | None = None
     active_checkpoint: str | None = None
     config_path = "werewolf.json"
     config = None
+    in_configurator = False
     try:
-        if args.command == "init":
+        if args.command in {"configure", "config", "setup"}:
+            in_configurator = True
+            tui_result = run_config_tui(
+                args.path,
+                color=False if args.no_color else None,
+            )
+            in_configurator = False
+            if tui_result is None:
+                return
+            config_path = str(tui_result.config_path)
+            if tui_result.saved:
+                print(f"配置已保存：{tui_result.config_path}")
+            if not tui_result.start_game:
+                print(f"准备开局时运行：werewolf play {tui_result.config_path}")
+                return
+            config = load_config(tui_result.config_path)
+            active_checkpoint = config.checkpoint_path
+        elif args.command == "init":
             path = write_example_config(args.path, force=args.force, full=args.full)
             print(f"已生成配置：{path}")
             if args.full:
@@ -256,6 +301,14 @@ def main(argv: list[str] | None = None) -> None:
             )
     except (EOFError, KeyboardInterrupt) as exc:
         interrupted_by_eof = isinstance(exc, EOFError)
+        if in_configurator:
+            message = (
+                "\n输入已关闭，未保存的配置修改已放弃。"
+                if interrupted_by_eof
+                else "\n配置已取消，未保存的修改已放弃。"
+            )
+            print(message, file=sys.stderr)
+            raise SystemExit(130) from None
         language = getattr(config, "language", "zh-CN")
         if language == "en":
             message = (

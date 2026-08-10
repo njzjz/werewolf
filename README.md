@@ -9,19 +9,22 @@
 ```bash
 python -m pip install -e .
 
+# 打开配置工作台：设置牌组、玩家、模型、房规与恢复点
+werewolf
+
 # 无需 API：8 人离线演示
 werewolf demo --players 8 --seed 7
 
 # 无需 API：电影 LOVERS 牌组
 werewolf demo --preset movie_lovers --seed 7
 
-# 生成精简的“1 真人 + 7 LLM”推荐配置
-werewolf init
+# 也可以为另一局指定配置路径
+werewolf configure my-game.json
 export OPENAI_API_KEY='你的密钥'
-werewolf play
+werewolf play my-game.json
 ```
 
-自定义路径也可以直接写成 `werewolf play my-game.json`。不安装时使用 `python -m werewolf demo|init|play`。
+TUI 支持方向键、`j`/`k`、Enter 和 Esc；在管道或无完整终端能力的环境中会自动退化为编号输入。配置检查通过后可直接选择“保存并开始游戏”。脚本和自动化仍可使用 `werewolf init` 生成 JSON 模板。不安装时使用 `python -m werewolf` 启动工作台。
 
 ## 核心能力
 
@@ -53,7 +56,9 @@ werewolf play
 
 ## 配置与运行
 
-`werewolf init` 默认只生成真正需要确认的内容：provider、模型和玩家。单 provider 会自动分配给所有未显式指定 provider 的 LLM 玩家，字符串玩家默认就是 LLM，因此常用配置可以很短：
+直接运行 `werewolf` 或 `werewolf configure [路径]` 会打开配置工作台。牌组与人数、每个席位的控制器和名称、模型 Provider、房规、终端体验、恢复点与公开日志都可以在同一界面中反复修改；保存前会统一检查玩家数量、身份组成、Provider 引用、输出路径冲突和模型占位值。已有 JSON 也可以直接载入编辑，persona、技能、自定义牌组和高级 Provider 字段会被保留。
+
+`werewolf init` 保留为适合脚本和自动化的非交互命令，默认只生成真正需要确认的内容：provider、模型和玩家。单 provider 会自动分配给所有未显式指定 provider 的 LLM 玩家，字符串玩家默认就是 LLM，因此配置也可以很短：
 
 ```json
 {
