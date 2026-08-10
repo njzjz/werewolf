@@ -31,10 +31,13 @@ from .models import (
 )
 from .rendering import frame_rendered_lines, sanitize_rendered_text
 
+_readline_module: Any
 try:
-    import readline as _readline
+    import readline as _readline_module
 except ImportError:  # pragma: no cover - unavailable on some non-POSIX builds.
-    _readline = None
+    _readline_module = None
+
+_readline: Any = _readline_module
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -174,19 +177,15 @@ class _IPv4HTTPSConnection(http.client.HTTPSConnection):
 class _IPv4HTTPHandler(urllib.request.HTTPHandler):
     """Route urllib HTTP requests through the IPv4 connection class."""
 
-    def http_open(self, request: urllib.request.Request) -> object:
+    def http_open(self, request: urllib.request.Request) -> http.client.HTTPResponse:
         return self.do_open(_IPv4HTTPConnection, request)
 
 
 class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
     """Route urllib HTTPS requests through the IPv4 connection class."""
 
-    def https_open(self, request: urllib.request.Request) -> object:
-        return self.do_open(
-            _IPv4HTTPSConnection,
-            request,
-            context=self._context,
-        )
+    def https_open(self, request: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(_IPv4HTTPSConnection, request)
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -200,7 +199,7 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         message: str,
         headers: object,
         new_url: str,
-    ) -> None:
+    ) -> urllib.request.Request | None:
         """Return no follow-up request for every redirect status."""
         return None
 

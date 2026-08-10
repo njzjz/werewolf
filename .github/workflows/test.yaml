@@ -31,6 +31,8 @@ jobs:
         run: uv pip install nox[uv]
       - name: Test with pytest
         run: nox -db uv
+      - name: Type check with pinned mypy
+        run: uvx mypy@1.19.1 --ignore-missing-imports $(git ls-files '*.py')
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v7
         with:

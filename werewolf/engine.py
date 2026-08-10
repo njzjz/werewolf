@@ -16,7 +16,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from urllib.parse import urlsplit
 
 from .agents import (
@@ -58,7 +58,7 @@ from .skills import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Mapping
 
     from .config import GameConfig, PlayerConfig
 
@@ -200,7 +200,7 @@ class Game:
         self,
         config: GameConfig,
         *,
-        controllers: dict[str, Controller] | None = None,
+        controllers: Mapping[str, Controller] | None = None,
         terminal: Terminal | None = None,
         resume_checkpoint: str | Path | None = None,
         force_new: bool = False,
@@ -215,10 +215,11 @@ class Game:
             None if config.seed is None else f"werewolf-discussion:{config.seed}"
         )
         self._discussion_rng = random.Random(discussion_seed)  # noqa: S311
+        checkpoint_value = (
+            resume_checkpoint if resume_checkpoint is not None else config.checkpoint_path
+        )
         self._checkpoint_path = (
-            Path(resume_checkpoint or config.checkpoint_path)
-            if resume_checkpoint or config.checkpoint_path
-            else None
+            Path(checkpoint_value) if checkpoint_value is not None else None
         )
         if resume_checkpoint is None and not force_new:
             self._refuse_existing_outputs()
@@ -673,7 +674,7 @@ class Game:
         kind: str,
         provider_name: str | None,
         persona: str,
-        overrides: dict[str, Controller],
+        overrides: Mapping[str, Controller],
     ) -> Controller:
         if name in overrides:
             return overrides[name]
@@ -1797,7 +1798,12 @@ class Game:
             (
                 item
                 for position, item in enumerate(self._action_journal)
-                if int(item.get("action_index", position)) == target_index
+                if (
+                    item.get("action_index", position)
+                    if isinstance(item.get("action_index", position), int)
+                    else position
+                )
+                == target_index
             ),
             None,
         )
@@ -1961,7 +1967,8 @@ class Game:
                 replace(request, retry_feedback=feedback) if feedback else request
             )
             try:
-                response = player.controller.act(self._view(player), attempt_request)
+                controller = cast("Controller", player.controller)
+                response = controller.act(self._view(player), attempt_request)
             except (EOFError, KeyboardInterrupt):
                 raise
             except Exception as exc:
@@ -2273,10 +2280,14 @@ class Game:
         snapshot = self._last_nonterminal_snapshot
         if not snapshot:
             return ""
-        alive_count = int(snapshot["alive_count"])
-        max_wolves = int(snapshot["max_wolves"])
-        day = int(snapshot["day"])
-        alive_ids = snapshot.get("alive_ids", [])
+        alive_count_value = snapshot.get("alive_count")
+        max_wolves_value = snapshot.get("max_wolves")
+        day_value = snapshot.get("day")
+        alive_count = alive_count_value if isinstance(alive_count_value, int) else 0
+        max_wolves = max_wolves_value if isinstance(max_wolves_value, int) else 0
+        day = day_value if isinstance(day_value, int) else 0
+        alive_ids_value = snapshot.get("alive_ids", [])
+        alive_ids = alive_ids_value if isinstance(alive_ids_value, list) else []
         alive_labels = [
             self._player_label(self._by_id[player_id])
             for player_id in alive_ids

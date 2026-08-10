@@ -277,16 +277,63 @@ def _rules_from_value(raw: object) -> RuleConfig:
     values = _object(raw, path)
     _reject_unknown(values, set(RuleConfig.__dataclass_fields__), path)
     defaults = RuleConfig()
-    parsed: dict[str, object] = {}
-    for field_name in RuleConfig.__dataclass_fields__:
-        value = values.get(field_name, getattr(defaults, field_name))
-        field_path = f"{path}.{field_name}"
-        parsed[field_name] = (
-            _integer(value, field_path)
-            if field_name in {"max_days", "wolf_chat_rounds"}
-            else _boolean(value, field_path)
-        )
-    return RuleConfig(**parsed)
+    return RuleConfig(
+        max_days=_integer(values.get("max_days", defaults.max_days), "rules.max_days"),
+        wolf_chat_rounds=_integer(
+            values.get("wolf_chat_rounds", defaults.wolf_chat_rounds),
+            "rules.wolf_chat_rounds",
+        ),
+        witch_can_self_save=_boolean(
+            values.get("witch_can_self_save", defaults.witch_can_self_save),
+            "rules.witch_can_self_save",
+        ),
+        witch_can_use_two_potions_same_night=_boolean(
+            values.get(
+                "witch_can_use_two_potions_same_night",
+                defaults.witch_can_use_two_potions_same_night,
+            ),
+            "rules.witch_can_use_two_potions_same_night",
+        ),
+        reveal_roles_on_death=_boolean(
+            values.get("reveal_roles_on_death", defaults.reveal_roles_on_death),
+            "rules.reveal_roles_on_death",
+        ),
+        allow_self_vote=_boolean(
+            values.get("allow_self_vote", defaults.allow_self_vote),
+            "rules.allow_self_vote",
+        ),
+        last_words=_boolean(
+            values.get("last_words", defaults.last_words),
+            "rules.last_words",
+        ),
+        first_night_last_words=_boolean(
+            values.get("first_night_last_words", defaults.first_night_last_words),
+            "rules.first_night_last_words",
+        ),
+        night_death_last_words=_boolean(
+            values.get("night_death_last_words", defaults.night_death_last_words),
+            "rules.night_death_last_words",
+        ),
+        day_vote_last_words=_boolean(
+            values.get("day_vote_last_words", defaults.day_vote_last_words),
+            "rules.day_vote_last_words",
+        ),
+        hunter_shot_last_words=_boolean(
+            values.get("hunter_shot_last_words", defaults.hunter_shot_last_words),
+            "rules.hunter_shot_last_words",
+        ),
+        randomize_discussion_start=_boolean(
+            values.get(
+                "randomize_discussion_start",
+                defaults.randomize_discussion_start,
+            ),
+            "rules.randomize_discussion_start",
+        ),
+        randomize_seating=_boolean(
+            values.get("randomize_seating", defaults.randomize_seating),
+            "rules.randomize_seating",
+        ),
+    )
 
 
 def _roles_from_value(raw: object) -> tuple[Role, ...] | None:

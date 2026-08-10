@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 import werewolf.agents as agents_module
-from werewolf.agents import LLMController, OpenAICompatibleClient, Terminal
+from werewolf.agents import Controller, LLMController, OpenAICompatibleClient, Terminal
 from werewolf.config import (
     GameConfig,
     LLMProviderConfig,
@@ -31,6 +31,7 @@ from werewolf.models import (
     ActionRequest,
     AgentResponse,
     Faction,
+    PlayerView,
     Role,
     Visibility,
 )
@@ -66,8 +67,8 @@ class ScriptedController:
         responses: dict[ActionKind, list[AgentResponse]] | None = None,
     ) -> None:
         self.responses = responses or {}
-        self.requests = []
-        self.views = []
+        self.requests: list[ActionRequest] = []
+        self.views: list[PlayerView] = []
 
     def act(self, view, request):
         """Use a scripted answer, then a deterministic legal fallback."""
@@ -141,7 +142,7 @@ class RecordingController:
 
     def __init__(self, responses: list[AgentResponse]) -> None:
         self.responses = list(responses)
-        self.requests = []
+        self.requests: list[ActionRequest] = []
 
     def act(self, _view, request):
         """Return the next queued answer and record the request that asked for it."""
@@ -948,7 +949,7 @@ def test_llm_public_votes_are_collected_in_parallel() -> None:
         parallel_llm_votes=True,
     )
     barrier = threading.Barrier(2, timeout=2)
-    controllers = {
+    controllers: dict[str, Controller] = {
         "p1": BarrierVoteController(barrier),
         "p2": BarrierVoteController(barrier),
         **{f"p{index}": ScriptedController() for index in range(3, 7)},
@@ -977,7 +978,7 @@ def test_parallel_vote_failure_does_not_wait_for_another_stalled_future() -> Non
         strict_controllers=True,
     )
     release = threading.Event()
-    controllers = {
+    controllers: dict[str, Controller] = {
         "p1": FailingController(),
         "p2": BlockingVoteController(release),
         **{f"p{index}": ScriptedController() for index in range(3, 7)},
@@ -1745,8 +1746,8 @@ def test_day_without_an_elimination_clears_the_medium_result() -> None:
     game = Game(fixed_role_config(roles), terminal=SilentTerminal())
     game.day = 2
     game._last_exiled_id = "p4"  # noqa: SLF001 - prior-day state under test.
-    game._discussion_order = lambda: []  # type: ignore[method-assign]  # noqa: SLF001
-    game._collect_votes = lambda _eligible: {}  # type: ignore[method-assign]  # noqa: SLF001
+    setattr(game, "_discussion_order", list)
+    setattr(game, "_collect_votes", lambda _eligible: {})
 
     game._daytime()  # noqa: SLF001
     game.day = 3

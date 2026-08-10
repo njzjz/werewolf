@@ -593,7 +593,7 @@ def test_authenticated_provider_requests_disable_all_redirects() -> None:
     request = client._request({"model": "test"})  # noqa: SLF001
     redirect_handler = next(
         handler
-        for handler in client._opener().handlers  # noqa: SLF001
+        for handler in getattr(client._opener(), "handlers")  # noqa: B009, SLF001
         if isinstance(handler, agents_module._NoRedirectHandler)  # noqa: SLF001
     )
 
@@ -662,7 +662,7 @@ def test_chat_stream_requests_usage_and_retries_without_it_when_rejected() -> No
             raise RuntimeError(msg)
         return '{"text":"完成"}'
 
-    client._read_stream = fake_read  # type: ignore[method-assign]  # noqa: SLF001
+    client._read_stream = fake_read  # type: ignore[assignment]  # noqa: SLF001
 
     content = client._post_stream({"model": "test"})  # noqa: SLF001
 
