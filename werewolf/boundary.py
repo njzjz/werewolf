@@ -116,6 +116,25 @@ class InformationBoundary:
             sender=sender,
         )
 
+    def police(
+        self,
+        *,
+        day: int,
+        phase: str,
+        text: str,
+        recipients: Iterable[str],
+        sender: str | None = None,
+    ) -> MemoryEvent:
+        """Deliver a team-channel message to an explicit Police roster."""
+        return self.publish(
+            day=day,
+            phase=phase,
+            text=text,
+            visibility=Visibility.POLICE,
+            recipients=recipients,
+            sender=sender,
+        )
+
     def lovers(
         self,
         *,

@@ -96,6 +96,7 @@ class ScriptedController:
             ActionKind.LAST_WORDS,
             ActionKind.TEAM_CHAT,
             ActionKind.LOVER_CHAT,
+            ActionKind.GHOST_GUESS,
         }:
             return AgentResponse(text="")
         return AgentResponse(
@@ -304,6 +305,28 @@ MOVIE_PRESETS = {
     ),
 }
 
+SOCIAL_PRESETS = {
+    "killer": Counter(
+        {
+            Role.WEREWOLF: 2,
+            Role.POLICE: 2,
+            Role.VILLAGER: 4,
+        },
+    ),
+    "ghost_similar": Counter(
+        {
+            Role.WEREWOLF: 2,
+            Role.VILLAGER: 6,
+        },
+    ),
+    "ghost_blank": Counter(
+        {
+            Role.WEREWOLF: 2,
+            Role.VILLAGER: 6,
+        },
+    ),
+}
+
 
 @pytest.mark.parametrize(("preset", "expected"), MOVIE_PRESETS.items())
 def test_movie_role_decks_match_the_film_compositions(
@@ -314,6 +337,15 @@ def test_movie_role_decks_match_the_film_compositions(
     deck = role_deck(sum(expected.values()), preset)
 
     assert Counter(deck) == expected
+
+
+@pytest.mark.parametrize(("preset", "expected"), SOCIAL_PRESETS.items())
+def test_social_mode_role_decks_match_the_advertised_compositions(
+    preset: str,
+    expected: Counter[Role],
+) -> None:
+    """Each social mode should resolve to its exact fixed eight-player deck."""
+    assert Counter(role_deck(8, preset)) == expected
 
 
 def test_daily_discussion_uses_a_seeded_circular_starting_seat() -> None:
@@ -503,6 +535,473 @@ def test_setup_keeps_roles_private_and_wolf_roster_team_only() -> None:
     assert all(
         "狼人队友名单" not in event.text for event in game.players[2].memory.events
     )
+
+
+def test_killer_setup_and_investigation_stay_inside_the_police_team() -> None:
+    """Police should share their roster, chat, choices, and result with nobody else."""
+    roles = [
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        Role.POLICE,
+        Role.POLICE,
+        *([Role.VILLAGER] * 4),
+    ]
+    first = ScriptedController(
+        {
+            ActionKind.TEAM_CHAT: [AgentResponse(text="建议查证1号")],
+            ActionKind.POLICE_INSPECT: [AgentResponse(choice="p1")],
+        },
+    )
+    second = ScriptedController(
+        {
+            ActionKind.TEAM_CHAT: [AgentResponse(text="同意查证1号")],
+            ActionKind.POLICE_INSPECT: [AgentResponse(choice="p1")],
+        },
+    )
+    game = Game(
+        fixed_role_config(roles, "killer"),
+        controllers={"p3": first, "p4": second},
+        terminal=SilentTerminal(),
+    )
+    game._setup()  # noqa: SLF001
+    game.day = 1
+    game.phase = "night"
+
+    game._police_turn()  # noqa: SLF001
+
+    police_routes = [
+        recipients
+        for event, recipients in game.boundary.audit_log
+        if event.visibility is Visibility.POLICE
+    ]
+    assert police_routes == [frozenset({"p3", "p4"})] * 4
+    inspect_request = next(
+        request
+        for request in first.requests
+        if request.kind is ActionKind.POLICE_INSPECT
+    )
+    assert {option.value for option in inspect_request.options} == {
+        "p1",
+        "p2",
+        "p5",
+        "p6",
+        "p7",
+        "p8",
+    }
+    for player_id in ("p3", "p4"):
+        assert any(
+            "警队查证结果：1号 玩家1 是【杀手】" in event.text
+            for event in game._by_id[player_id].memory.events  # noqa: SLF001
+        )
+    for player_id in ("p1", "p2", "p5", "p6", "p7", "p8"):
+        assert all(
+            event.visibility is not Visibility.POLICE
+            for event in game._by_id[player_id].memory.events  # noqa: SLF001
+        )
+
+
+@pytest.mark.parametrize(
+    ("dead_ids", "winner"),
+    [
+        (("p1", "p2"), Faction.GOOD),
+        (("p3", "p4"), Faction.WEREWOLF),
+        (("p5", "p6", "p7", "p8"), Faction.WEREWOLF),
+    ],
+)
+def test_killer_mode_uses_edge_elimination_victory_conditions(
+    dead_ids: tuple[str, ...],
+    winner: Faction,
+) -> None:
+    """Killers win by clearing either good role group; good wins by clearing killers."""
+    roles = [
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        Role.POLICE,
+        Role.POLICE,
+        *([Role.VILLAGER] * 4),
+    ]
+    game = Game(
+        fixed_role_config(roles, "killer"),
+        terminal=SilentTerminal(),
+    )
+    for player_id in dead_ids:
+        game._by_id[player_id].alive = False  # noqa: SLF001
+
+    assert game._winner() is winner  # noqa: SLF001
+
+
+def test_killer_mode_does_not_end_at_ordinary_werewolf_parity() -> None:
+    """Two killers versus one Police and one Civilian is not yet a cleared edge."""
+    roles = [
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        Role.POLICE,
+        Role.POLICE,
+        *([Role.VILLAGER] * 4),
+    ]
+    game = Game(
+        fixed_role_config(roles, "killer"),
+        terminal=SilentTerminal(),
+    )
+    for player_id in ("p4", "p6", "p7", "p8"):
+        game._by_id[player_id].alive = False  # noqa: SLF001
+
+    assert game._winner() is None  # noqa: SLF001
+
+
+@pytest.mark.parametrize("preset", ["ghost_similar", "ghost_blank"])
+def test_ghost_modes_start_with_daytime_and_never_enter_night(
+    preset: str,
+) -> None:
+    """Both Ghost variants should repeat discussion and voting without night phases."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    game = Game(
+        fixed_role_config(roles, preset),
+        terminal=SilentTerminal(),
+    )
+    daytime_days: list[int] = []
+
+    def unexpected_night() -> None:
+        pytest.fail("a Ghost match must not execute a night phase")
+
+    def decisive_daytime() -> None:
+        daytime_days.append(game.day)
+        game.phase = "vote"
+        game._by_id["p1"].alive = False  # noqa: SLF001
+        game._by_id["p2"].alive = False  # noqa: SLF001
+
+    game._night = unexpected_night  # type: ignore[method-assign]  # noqa: SLF001
+    game._daytime = decisive_daytime  # type: ignore[method-assign]  # noqa: SLF001
+
+    result = game.run()
+
+    assert result.winner is Faction.GOOD
+    assert daytime_days == [1]
+    assert all(event.phase != "night" for event, _ in game.boundary.audit_log)
+
+
+def test_similar_word_ghosts_receive_a_different_word_without_a_roster() -> None:
+    """Similar-word Ghosts know their clue but must not know each other."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    game = Game(
+        fixed_role_config(roles, "ghost_similar"),
+        terminal=SilentTerminal(),
+    )
+
+    game._setup()  # noqa: SLF001
+
+    assert game._ghost_word_pair is not None  # noqa: SLF001
+    water_word, ghost_word = game._ghost_word_pair  # noqa: SLF001
+    assert water_word
+    assert ghost_word
+    assert water_word != ghost_word
+    for player_id in ("p1", "p2"):
+        events = game._by_id[player_id].memory.events  # noqa: SLF001
+        assert any(f"私密词牌是【{ghost_word}】" in event.text for event in events)
+        assert all(event.visibility is not Visibility.WEREWOLF for event in events)
+        assert all("队友名单" not in event.text for event in events)
+    for player_id in ("p3", "p4", "p5", "p6", "p7", "p8"):
+        assert any(
+            f"私密词牌是【{water_word}】" in event.text
+            for event in game._by_id[player_id].memory.events  # noqa: SLF001
+        )
+
+
+def test_blank_ghosts_receive_no_word_and_are_told_to_infer_it() -> None:
+    """Blank Ghosts receive no decoy word and privately learn their teammate."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    game = Game(
+        fixed_role_config(roles, "ghost_blank"),
+        terminal=SilentTerminal(),
+    )
+
+    game._setup()  # noqa: SLF001
+
+    assert game._ghost_word_pair is not None  # noqa: SLF001
+    water_word, ghost_word = game._ghost_word_pair  # noqa: SLF001
+    assert water_word
+    assert ghost_word == ""
+    for player_id in ("p1", "p2"):
+        events = game._by_id[player_id].memory.events  # noqa: SLF001
+        assert any(
+            "本局没有词牌" in event.text and "根据水民的公开描述猜出" in event.text
+            for event in events
+        )
+        assert any(
+            event.visibility is Visibility.WEREWOLF
+            and "无词幽灵队友名单：1号 玩家1、2号 玩家2" in event.text
+            and "被投出时" in event.text
+            for event in events
+        )
+    for player_id in ("p3", "p4", "p5", "p6", "p7", "p8"):
+        assert any(
+            f"私密词牌是【{water_word}】" in event.text
+            for event in game._by_id[player_id].memory.events  # noqa: SLF001
+        )
+        assert all(
+            event.visibility is not Visibility.WEREWOLF
+            for event in game._by_id[player_id].memory.events  # noqa: SLF001
+        )
+
+
+def test_eliminated_blank_ghost_can_guess_the_word_for_an_immediate_win() -> None:
+    """A correct one-word guess should override the ordinary all-Ghosts-out result."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    ghost = ScriptedController()
+    game = Game(
+        fixed_role_config(roles, "ghost_blank"),
+        controllers={"p1": ghost},
+        terminal=SilentTerminal(),
+    )
+    game._setup()  # noqa: SLF001
+    assert game._ghost_word_pair is not None  # noqa: SLF001
+    water_word = game._ghost_word_pair[0]  # noqa: SLF001
+    ghost.responses[ActionKind.GHOST_GUESS] = [
+        AgentResponse(text=f"【{water_word}】。"),
+    ]
+    game.day = 1
+
+    game._apply_deaths(  # noqa: SLF001
+        {"p1": {DeathCause.VOTE}},
+        "1号 玩家1 被放逐。",
+    )
+
+    assert game._ghost_guess_won is True  # noqa: SLF001
+    assert game._winner() is Faction.WEREWOLF  # noqa: SLF001
+    assert any(
+        "无词幽灵翻盘成功" in event.text
+        for event in game._by_id["p3"].memory.events  # noqa: SLF001
+    )
+    assert [request.kind for request in ghost.requests].count(
+        ActionKind.GHOST_GUESS,
+    ) == 1
+
+
+def test_each_eliminated_blank_ghost_gets_one_guess_and_wrong_guesses_continue() -> (
+    None
+):
+    """A missed guess should not consume the surviving teammate's later chance."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    first = ScriptedController(
+        {ActionKind.GHOST_GUESS: [AgentResponse(text="错误答案一")]},
+    )
+    second = ScriptedController(
+        {ActionKind.GHOST_GUESS: [AgentResponse(text="错误答案二")]},
+    )
+    config = fixed_role_config(roles, "ghost_blank")
+    config = replace(config, rules=replace(config.rules, last_words=False))
+    game = Game(
+        config,
+        controllers={"p1": first, "p2": second},
+        terminal=SilentTerminal(),
+    )
+    game._setup()  # noqa: SLF001
+    game.day = 1
+
+    game._apply_deaths(  # noqa: SLF001
+        {"p1": {DeathCause.VOTE}},
+        "1号 玩家1 被放逐。",
+    )
+    assert game._ghost_guess_won is False  # noqa: SLF001
+    assert game._winner() is None  # noqa: SLF001
+
+    game._apply_deaths(  # noqa: SLF001
+        {"p2": {DeathCause.VOTE}},
+        "2号 玩家2 被放逐。",
+    )
+
+    assert game._ghost_guess_won is False  # noqa: SLF001
+    assert game._winner() is Faction.GOOD  # noqa: SLF001
+    assert [request.kind for request in first.requests].count(
+        ActionKind.GHOST_GUESS,
+    ) == 1
+    assert [request.kind for request in second.requests].count(
+        ActionKind.GHOST_GUESS,
+    ) == 1
+
+
+def test_similar_word_ghosts_do_not_receive_a_final_guess() -> None:
+    """The elimination guess is exclusive to the no-word Ghost variant."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    ghost = ScriptedController()
+    config = fixed_role_config(roles, "ghost_similar")
+    config = replace(config, rules=replace(config.rules, last_words=False))
+    game = Game(
+        config,
+        controllers={"p1": ghost},
+        terminal=SilentTerminal(),
+    )
+    game._setup()  # noqa: SLF001
+    game.day = 1
+
+    game._apply_deaths(  # noqa: SLF001
+        {"p1": {DeathCause.VOTE}},
+        "1号 玩家1 被放逐。",
+    )
+
+    assert all(request.kind is not ActionKind.GHOST_GUESS for request in ghost.requests)
+
+
+@pytest.mark.parametrize("preset", ["ghost_similar", "ghost_blank"])
+def test_ghost_survival_win_waits_until_only_one_water_civilian_remains(
+    preset: str,
+) -> None:
+    """Two Ghosts versus two Water Civilians must continue; one Water ends it."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    game = Game(
+        fixed_role_config(roles, preset),
+        terminal=SilentTerminal(),
+    )
+    for player_id in ("p3", "p4", "p5", "p6"):
+        game._by_id[player_id].alive = False  # noqa: SLF001
+
+    assert game._winner() is None  # noqa: SLF001
+
+    game._by_id["p7"].alive = False  # noqa: SLF001
+
+    assert game._winner() is Faction.WEREWOLF  # noqa: SLF001
+
+
+@pytest.mark.parametrize("preset", ["ghost_similar", "ghost_blank"])
+def test_ghost_modes_disable_last_words_to_protect_the_secret_word(
+    preset: str,
+) -> None:
+    """A flipped Water Civilian must not be able to reveal the answer after exit."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    game = Game(
+        fixed_role_config(roles, preset),
+        terminal=SilentTerminal(),
+    )
+    game.day = 1
+
+    assert game._allows_last_words({DeathCause.VOTE}) is False  # noqa: SLF001
+
+
+@pytest.mark.parametrize("preset", ["ghost_similar", "ghost_blank"])
+def test_ghost_checkpoint_preserves_the_private_word_setup(
+    preset: str,
+    tmp_path: Path,
+) -> None:
+    """A resumed Ghost game must keep the original secret word assignment."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    checkpoint = tmp_path / f"{preset}.checkpoint.json"
+    config = replace(
+        fixed_role_config(roles, preset),
+        checkpoint_path=str(checkpoint),
+    )
+    game = Game(config, terminal=SilentTerminal())
+    game._setup()  # noqa: SLF001
+    original_pair = game._ghost_word_pair  # noqa: SLF001
+    game._save_checkpoint(next_day=1, next_step="daytime")  # noqa: SLF001
+
+    resumed = Game(
+        config,
+        terminal=SilentTerminal(),
+        resume_checkpoint=checkpoint,
+    )
+
+    assert resumed._ghost_word_pair == original_pair  # noqa: SLF001
+    assert resumed._ghost_guess_won is False  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("preset", "word_reveal"),
+    [
+        ("ghost_similar", "幽灵【"),
+        ("ghost_blank", "幽灵没有词牌"),
+    ],
+)
+def test_ghost_modes_force_death_flips_and_reveal_words_at_settlement(
+    preset: str,
+    word_reveal: str,
+) -> None:
+    """Ghost identity flips and word cards are mandatory mode rules."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    config = fixed_role_config(roles, preset)
+    config = replace(config, rules=replace(config.rules, last_words=False))
+    game = Game(config, terminal=SilentTerminal())
+    game._setup()  # noqa: SLF001
+    game.day = 1
+
+    game._apply_deaths(  # noqa: SLF001
+        {"p1": {DeathCause.VOTE}},
+        "1号 玩家1 被放逐。",
+    )
+    assert any(
+        "身份公开：1号 玩家1=幽灵" in event.text
+        for event in game._by_id["p3"].memory.events  # noqa: SLF001
+    )
+
+    game._finish(Faction.GOOD, "test")  # noqa: SLF001
+    settlement = game._by_id["p3"].memory.events[-1].text  # noqa: SLF001
+    assert "全部身份：" in settlement
+    assert "词牌揭晓：水民【" in settlement
+    assert word_reveal in settlement
+
+
+@pytest.mark.parametrize(
+    ("preset", "game_name", "role_name", "adversary_name"),
+    [
+        ("killer", "杀人游戏", "杀手", "杀手"),
+        ("ghost_similar", "捉鬼游戏·近义词版", "幽灵", "幽灵"),
+        ("ghost_blank", "捉鬼游戏·无词版", "幽灵", "幽灵"),
+    ],
+)
+def test_player_views_and_role_skills_are_themed_for_social_modes(
+    preset: str,
+    game_name: str,
+    role_name: str,
+    adversary_name: str,
+) -> None:
+    """Controllers should receive mode-native labels and non-conflicting guidance."""
+    roles = (
+        [Role.WEREWOLF, Role.WEREWOLF, Role.POLICE, Role.POLICE] + [Role.VILLAGER] * 4
+        if preset == "killer"
+        else [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    )
+    game = Game(
+        fixed_role_config(roles, preset),
+        terminal=SilentTerminal(),
+    )
+    view = game._view(game._by_id["p1"])  # noqa: SLF001
+    role_skill = next(skill for skill in view.skills if skill.name == "role_werewolf")
+    global_skill = next(
+        skill for skill in view.skills if skill.name == "global_gamecraft"
+    )
+
+    assert view.game_name == game_name
+    assert view.role_name == role_name
+    assert view.adversary_name == adversary_name
+    if preset == "killer":
+        assert "杀手队友" in role_skill.instructions
+        assert "狼人" not in role_skill.instructions
+        assert "只看屠边" in global_skill.instructions
+        assert "狼人" not in global_skill.instructions
+    else:
+        assert "没有私聊或夜间行动" in role_skill.instructions
+        assert "狼人" not in role_skill.instructions
+        assert "本局没有夜晚或身份能力" in global_skill.instructions
+        assert "刀口" not in global_skill.instructions
+        if preset == "ghost_blank":
+            assert "知道另一名无词幽灵" in role_skill.instructions
+            assert "一次公开猜词机会" in role_skill.instructions
+
+
+def test_ghost_mechanical_context_uses_the_one_water_survival_rule() -> None:
+    """The public constraint must not tell agents that ordinary parity ended play."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    game = Game(
+        fixed_role_config(roles, "ghost_similar"),
+        terminal=SilentTerminal(),
+    )
+    game.day = 2
+    game.phase = "vote"
+    game._record_nonterminal_snapshot("day_vote")  # noqa: SLF001
+
+    context = game._mechanical_context()  # noqa: SLF001
+
+    assert "至少有一名幽灵和两名水民" in context
+    assert "至多有" not in context
 
 
 def test_run_checks_terminal_conditions_immediately_after_setup() -> None:
@@ -2361,6 +2860,29 @@ def test_movie_example_configs_are_loadable(
 
     assert config.role_preset == preset
     assert len(config.players) == player_count
+    assert config.players[0].controller == "human"
+
+
+@pytest.mark.parametrize(
+    ("filename", "preset"),
+    [
+        ("killer.json", "killer"),
+        ("ghost_similar.json", "ghost_similar"),
+        ("ghost_blank.json", "ghost_blank"),
+    ],
+)
+def test_social_mode_example_configs_are_loadable(
+    filename: str,
+    preset: str,
+) -> None:
+    """Each new mode should ship with a runnable human-plus-bot example."""
+    path = Path(__file__).parents[1] / "examples" / filename
+
+    config = load_config(path)
+
+    assert config.role_preset == preset
+    assert len(config.players) == 8
+    assert config.players[0].name == "真人玩家"
     assert config.players[0].controller == "human"
 
 

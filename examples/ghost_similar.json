@@ -1,9 +1,11 @@
 {
   "language": "zh-CN",
-  "role_preset": "movie_lovers",
+  "role_preset": "ghost_similar",
   "seed": null,
   "clear_screen": true,
-  "memory_directory": "game_memories/movie_lovers",
+  "memory_directory": "game_memories/ghost_similar",
+  "public_transcript_path": "game_runs/ghost_similar.public.log",
+  "checkpoint_path": "game_runs/ghost_similar.private.checkpoint.json",
   "players": [
     {
       "name": "真人玩家",
@@ -16,9 +18,6 @@
     { "name": "玩家05", "controller": "bot", "skills": ["logic", "memory"] },
     { "name": "玩家06", "controller": "bot", "skills": ["logic", "memory"] },
     { "name": "玩家07", "controller": "bot", "skills": ["logic", "memory"] },
-    { "name": "玩家08", "controller": "bot", "skills": ["logic", "memory"] },
-    { "name": "玩家09", "controller": "bot", "skills": ["logic", "memory"] },
-    { "name": "玩家10", "controller": "bot", "skills": ["logic", "memory"] },
-    { "name": "玩家11", "controller": "bot", "skills": ["logic", "memory"] }
+    { "name": "玩家08", "controller": "bot", "skills": ["logic", "memory"] }
   ]
 }

@@ -297,7 +297,20 @@ class PlayerToolbox:
             for event in self.view.events
             if event.visibility is not Visibility.PUBLIC
         ]
-        role_names = tuple(localized(ROLE_NAMES, self.view.language).values())
+        themed_role_names = (
+            ("杀手", "警察", "平民", "幽灵", "水民")
+            if self.view.language != "en"
+            else ("Killer", "Police", "Civilian", "Ghost", "Water Civilian")
+        )
+        role_names = tuple(
+            dict.fromkeys(
+                (
+                    *localized(ROLE_NAMES, self.view.language).values(),
+                    self.view.adversary_name,
+                    *themed_role_names,
+                ),
+            ),
+        )
         role_mentions = [
             {
                 **self._event(event, text_limit=220),
@@ -424,7 +437,11 @@ class PlayerToolbox:
             return event is Visibility.PUBLIC
         if requested == "private":
             return event is Visibility.PRIVATE
-        return event in {Visibility.WEREWOLF, Visibility.LOVERS}
+        return event in {
+            Visibility.WEREWOLF,
+            Visibility.POLICE,
+            Visibility.LOVERS,
+        }
 
     def _player_dossier(self, arguments: dict[str, Any]) -> dict[str, Any]:
         self._reject_extra(arguments, {"player_id"})

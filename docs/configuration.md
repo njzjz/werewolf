@@ -2,7 +2,7 @@
 
 推荐直接运行 `werewolf`，或用 `werewolf configure my-game.json` 指定路径。配置工作台可以创建或载入已有 JSON，并在一个界面中完成：
 
-- 游戏语言、内置电影牌组、经典人数和自定义身份计数；
+- 游戏语言、经典狼人杀、杀人游戏、两种捉鬼、内置电影牌组和自定义身份计数；
 - 真人、LLM、本地机器人数量，以及逐席名称、persona、技能和固定身份；
 - 多个 OpenAI-compatible Provider、模型、接口协议、推理强度、流式传输和 Prompt Caching；
 - LLM 只读证据工具及每个动作允许的工具往返轮数；
@@ -72,13 +72,23 @@ werewolf setup local.json --no-color
 
 ## 身份牌组
 
-省略牌组设置时使用经典牌组。内置电影牌组仍可通过 `role_preset` 选择：
+省略牌组设置时使用经典牌组。所有内置模式都通过 `role_preset` 选择：
 
 ```json
 {
-  "role_preset": "movie_lovers"
+  "role_preset": "ghost_blank"
 }
 ```
+
+常用值如下：
+
+| `role_preset`   | 固定配置与流程 |
+| --------------- | -------------- |
+| `killer`        | 8 人杀人游戏：2 杀手、2 警察、4 平民 |
+| `ghost_similar` | 8 人捉鬼近义词版：2 幽灵拿相关词、6 水民拿公共词 |
+| `ghost_blank`   | 8 人捉鬼无词版：2 名互认幽灵无词可猜、6 水民拿公共词 |
+
+三个可直接运行的真人加本地 bot 示例位于 `examples/killer.json`、`examples/ghost_similar.json` 和 `examples/ghost_blank.json`。捉鬼模式由 preset 自动跳过夜晚；无词版被投出的幽灵会进入一次必答猜词动作。
 
 需要自由组合身份牌时，使用 `roles` 计数表；计数总和必须等于玩家人数：
 
@@ -94,7 +104,7 @@ werewolf setup local.json --no-color
 }
 ```
 
-支持的身份名为 `villager`、`werewolf`、`seer`、`witch`、`hunter`、`medium`、`bodyguard`、`madman`、`fox`、`cupid` 和 `shared`。共有者必须为 0 或 2 张；妖狐与丘比特不能同时启用；预言家、女巫等单例身份不能重复。
+支持的身份名为 `villager`、`werewolf`、`police`、`seer`、`witch`、`hunter`、`medium`、`bodyguard`、`madman`、`fox`、`cupid` 和 `shared`。内置新模式会把内部的 `werewolf`/`villager` 显示为杀手/平民或幽灵/水民；`police` 用于杀人游戏。共有者必须为 0 或 2 张；妖狐与丘比特不能同时启用；预言家、女巫等单例身份不能重复。
 
 整副牌默认洗牌。若主持人要指定少数玩家的身份，可只给这些玩家填写 `fixed_role`，未指定玩家继续从剩余牌堆随机抽取：
 
@@ -108,7 +118,7 @@ werewolf setup local.json --no-color
 
 固定身份会暴露给读取配置的人，适合主持人测试或有意设计的对局，不建议用于需要主持人也完全未知身份的普通游戏。
 
-`roles` 只覆盖身份组成；`role_preset` 仍决定经典或电影模式的存活奖金与牌组专项策略。自定义普通桌游通常保持默认 `classic`，需要电影生存结算时可同时指定相应电影 preset。
+`roles` 只覆盖身份组成；`role_preset` 仍决定昼夜流程、身份显示、胜负条件、猜词规则、电影存活奖金与牌组专项策略。自定义普通桌游通常保持默认 `classic`；不要只为了换一副牌而套用 `killer` 或 `ghost_*`，否则会同时启用对应模式规则。
 
 ## 高级顶层选项
 

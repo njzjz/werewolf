@@ -213,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--preset",
         default="classic",
         choices=tuple(ROLE_PRESET_SIZES),
-        help="身份牌组：classic 或电影系列预设",
+        help="游戏模式：classic、killer、ghost_similar、ghost_blank 或电影系列预设",
     )
     return parser
 

@@ -68,3 +68,24 @@ def test_lover_channel_is_delivered_only_to_the_linked_pair() -> None:
     assert first.memory.events[-1].visibility is Visibility.LOVERS
     assert second.memory.events[-1].text == "恋人秘密"
     assert not outsider.memory.events
+
+
+def test_police_channel_is_delivered_only_to_the_police_team() -> None:
+    """Police coordination must not enter a Killer or Civilian memory."""
+    first = make_player("p1", "警察一", Role.POLICE)
+    second = make_player("p2", "警察二", Role.POLICE)
+    killer = make_player("p3", "杀手", Role.WEREWOLF)
+    civilian = make_player("p4", "平民", Role.VILLAGER)
+    boundary = InformationBoundary([first, second, killer, civilian])
+
+    boundary.police(
+        day=1,
+        phase="night",
+        text="警队查证秘密",
+        recipients=("p1", "p2"),
+    )
+
+    assert first.memory.events[-1].visibility is Visibility.POLICE
+    assert second.memory.events[-1].text == "警队查证秘密"
+    assert not killer.memory.events
+    assert not civilian.memory.events

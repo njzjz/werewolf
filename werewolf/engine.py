@@ -10,6 +10,7 @@ import re
 import tempfile
 import threading
 import time
+import unicodedata
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import suppress
@@ -58,6 +59,7 @@ from .skills import (
     add_lover_skill,
     add_movie_survival_skill,
     add_preset_skill,
+    apply_mode_role_skill,
     resolve_player_skills,
 )
 
@@ -160,18 +162,77 @@ MOVIE_ROLE_DECKS: dict[str, tuple[Role, ...]] = {
     ),
 }
 
+SOCIAL_ROLE_DECKS: dict[str, tuple[Role, ...]] = {
+    "killer": (
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        Role.POLICE,
+        Role.POLICE,
+        *([Role.VILLAGER] * 4),
+    ),
+    "ghost_similar": (
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        *([Role.VILLAGER] * 6),
+    ),
+    "ghost_blank": (
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        *([Role.VILLAGER] * 6),
+    ),
+}
+
+PRESET_ROLE_DECKS: dict[str, tuple[Role, ...]] = {
+    **SOCIAL_ROLE_DECKS,
+    **MOVIE_ROLE_DECKS,
+}
+
+# Related words create discussion evidence without making either faction's
+# clue a direct synonym of the other. The seeded judge chooses one pair per
+# match and keeps both words private until final settlement.
+GHOST_WORD_PAIRS: dict[str, tuple[tuple[str, str], ...]] = {
+    "zh-CN": (
+        ("咖啡", "奶茶"),
+        ("月亮", "太阳"),
+        ("地铁", "公交车"),
+        ("雨伞", "雨衣"),
+        ("钢琴", "吉他"),
+        ("猫", "狐狸"),
+        ("冰箱", "空调"),
+        ("电影", "电视剧"),
+        ("饺子", "包子"),
+        ("医生", "护士"),
+        ("沙漠", "海滩"),
+        ("地图", "指南针"),
+    ),
+    "en": (
+        ("coffee", "milk tea"),
+        ("moon", "sun"),
+        ("subway", "bus"),
+        ("umbrella", "raincoat"),
+        ("piano", "guitar"),
+        ("cat", "fox"),
+        ("refrigerator", "air conditioner"),
+        ("movie", "television series"),
+        ("dumpling", "steamed bun"),
+        ("doctor", "nurse"),
+        ("desert", "beach"),
+        ("map", "compass"),
+    ),
+}
+
 
 def role_deck(player_count: int, preset: str = "classic") -> list[Role]:
-    """Return a classic deck or an exact movie-series role composition.
+    """Return a classic deck or an exact built-in mode composition.
 
     Six-player games omit the Hunter; larger games include all three special
     good roles. This is a compact no-Sheriff rule set suitable for terminal and
-    agent play rather than a tournament-specific ruleset. Movie presets use
-    fixed cast sizes and reproduce the supported film variants.
+    agent play rather than a tournament-specific ruleset. Named social and
+    movie presets use fixed cast sizes and exact advertised compositions.
     """
     if preset != "classic":
         try:
-            deck = list(MOVIE_ROLE_DECKS[preset])
+            deck = list(PRESET_ROLE_DECKS[preset])
         except KeyError:
             msg = f"Unknown role preset: {preset}"
             raise ValueError(msg) from None
@@ -250,6 +311,8 @@ class Game:
         self.phase = "setup"
         self._antidote_available = True
         self._poison_available = True
+        self._ghost_word_pair: tuple[str, str] | None = None
+        self._ghost_guess_won = False
         self._last_exiled_id: str | None = None
         # Anchor for the next day's public discussion: the seat clockwise after
         # the most recent deceased player. ``None`` until somebody has died,
@@ -389,6 +452,10 @@ class Game:
             "phase": self.phase,
             "antidote_available": self._antidote_available,
             "poison_available": self._poison_available,
+            "ghost_word_pair": (
+                list(self._ghost_word_pair) if self._ghost_word_pair else None
+            ),
+            "ghost_guess_won": self._ghost_guess_won,
             "last_exiled_id": self._last_exiled_id,
             "last_death_id": self._last_death_id,
             "elapsed_seconds": time.monotonic() - self._started_at,
@@ -536,6 +603,19 @@ class Game:
         self.phase = str(raw["phase"])
         self._antidote_available = bool(raw["antidote_available"])
         self._poison_available = bool(raw["poison_available"])
+        ghost_words = raw.get("ghost_word_pair")
+        if ghost_words is None:
+            self._ghost_word_pair = None
+        elif (
+            isinstance(ghost_words, list)
+            and len(ghost_words) == 2
+            and all(isinstance(word, str) for word in ghost_words)
+        ):
+            self._ghost_word_pair = (ghost_words[0], ghost_words[1])
+        else:
+            msg = "Checkpoint ghost word pair is malformed"
+            raise TypeError(msg)
+        self._ghost_guess_won = bool(raw.get("ghost_guess_won", False))
         self._last_exiled_id = raw.get("last_exiled_id")
         # Older checkpoints written before death-anchored discussion order
         # do not contain this field. Defaulting to ``None`` only affects the
@@ -620,9 +700,10 @@ class Game:
     ) -> tuple[Skill, ...]:
         """Build one player's complete prompt guidance in a stable order."""
         skills = resolve_player_skills(role, list(configured))
-        if self.config.role_preset != "classic":
+        skills = apply_mode_role_skill(skills, self.config.role_preset, role)
+        if self._is_movie_mode():
             skills = add_movie_survival_skill(skills)
-        preset_deck = MOVIE_ROLE_DECKS.get(self.config.role_preset)
+        preset_deck = PRESET_ROLE_DECKS.get(self.config.role_preset)
         if preset_deck is not None and self._resolved_role_counts == Counter(
             preset_deck
         ):
@@ -735,7 +816,7 @@ class Game:
                 return self._finish(winner, "setup_resolution")
             self._record_nonterminal_snapshot("setup")
             next_day = 1
-            next_step = "night"
+            next_step = "daytime" if self._is_ghost_mode() else "night"
             self._save_checkpoint(next_day=next_day, next_step=next_step)
         for day in range(next_day, self.config.rules.max_days + 1):
             self.day = day
@@ -753,7 +834,7 @@ class Game:
                 if winner is not None:
                     return self._finish(winner, "day_vote")
                 self._record_nonterminal_snapshot("day_vote")
-                next_step = "night"
+                next_step = "daytime" if self._is_ghost_mode() else "night"
                 self._save_checkpoint(next_day=day + 1, next_step=next_step)
         return self._finish(None, "max_days")
 
@@ -805,8 +886,8 @@ class Game:
         if any(provider.max_tokens > 5000 for provider in providers):
             notices.append(
                 self._t(
-                    "检测到单次输出上限超过 5000 token；狼人杀动作通常无需如此大的预算。",
-                    "A per-action output limit above 5000 tokens was detected; Werewolf actions rarely need that budget.",
+                    f"检测到单次输出上限超过 5000 token；{self._game_name()}动作通常无需如此大的预算。",
+                    f"A per-action output limit above 5000 tokens was detected; {self._game_name()} actions rarely need that budget.",
                 ),
             )
         label = self._t("提示", "Notice")
@@ -817,19 +898,19 @@ class Game:
         self.phase = "setup"
         seats = "、".join(self._player_label(player) for player in self.players)
         composition = Counter(player.role for player in self.players)
-        role_names = localized(ROLE_NAMES, self.config.language)
+        role_names = self._role_names()
         role_summary = "，".join(
             f"{role_names[role]}×{count}" for role, count in composition.items()
         )
         death_rule = (
             self._t("死亡翻牌", "roles are revealed on death")
-            if self.config.rules.reveal_roles_on_death
+            if self._reveals_roles_on_death()
             else self._t("死亡不翻牌", "roles stay hidden on death")
         )
         self._announce(
             self._t(
-                f"游戏开始。玩家：{seats}。本局身份配置：{role_summary}。{death_rule}。",
-                f"Game begins. Players: {seats}. Role deck: {role_summary}. {death_rule}.",
+                f"{self._game_name()}开始。玩家：{seats}。本局身份配置：{role_summary}。{death_rule}。",
+                f"{self._game_name()} begins. Players: {seats}. Role deck: {role_summary}. {death_rule}.",
             ),
         )
         wolf_ids = self._wolf_ids(alive_only=False)
@@ -838,9 +919,7 @@ class Game:
         )
         for player in self.players:
             role_name = role_names[player.role]
-            description = localized(ROLE_DESCRIPTIONS, self.config.language)[
-                player.role
-            ]
+            description = self._role_descriptions()[player.role]
             self.boundary.private(
                 day=0,
                 phase=self.phase,
@@ -850,15 +929,18 @@ class Game:
                     f"Your role is [{role_name}]. {description}",
                 ),
             )
-        self.boundary.werewolves(
-            day=0,
-            phase=self.phase,
-            recipients=wolf_ids,
-            text=self._t(
-                f"你的狼人队友名单：{wolf_names}。",
-                f"Werewolf roster: {wolf_names}.",
-            ),
-        )
+        if not self._is_ghost_mode():
+            self.boundary.werewolves(
+                day=0,
+                phase=self.phase,
+                recipients=wolf_ids,
+                text=self._t(
+                    f"你的{self._adversary_name()}队友名单：{wolf_names}。",
+                    f"{self._adversary_name()} teammate roster: {wolf_names}.",
+                ),
+            )
+        self._setup_police()
+        self._setup_ghost_words()
         self._setup_shared_players()
         self._setup_lovers()
         # Reveal roles one human at a time; LLMs learn through isolated memory.
@@ -878,6 +960,68 @@ class Game:
                             ),
                         )
                     self.terminal.clear()
+
+    def _setup_police(self) -> None:
+        """Reveal the Police roster only to Police players in killer mode."""
+        police_ids = self._police_ids(alive_only=False)
+        if not police_ids:
+            return
+        police_names = "、".join(
+            self._player_label(self._by_id[player_id]) for player_id in police_ids
+        )
+        self.boundary.police(
+            day=0,
+            phase=self.phase,
+            recipients=police_ids,
+            text=self._t(
+                f"你的警察队友名单：{police_names}。每夜共同查证一名非警察玩家。",
+                f"Police roster: {police_names}. Investigate one non-police player together each night.",
+            ),
+        )
+
+    def _setup_ghost_words(self) -> None:
+        """Assign one private clue word per player for either ghost variant."""
+        if not self._is_ghost_mode():
+            return
+        pairs = localized(GHOST_WORD_PAIRS, self.config.language)
+        water_word, related_word = self.rng.choice(pairs)
+        ghost_word = related_word if self.config.role_preset == "ghost_similar" else ""
+        self._ghost_word_pair = (water_word, ghost_word)
+        for player in self.players:
+            if player.role is Role.WEREWOLF and not ghost_word:
+                text = self._t(
+                    "你是【幽灵】，本局没有词牌。根据水民的公开描述猜出他们的词，并给出不露馅的描述；不要声称法官给了你一个词。",
+                    "You are a [Ghost] and receive no word. Infer the Water Civilians' word from public clues and give a compatible description; do not claim the judge gave you a word.",
+                )
+            else:
+                word = ghost_word if player.role is Role.WEREWOLF else water_word
+                text = self._t(
+                    f"你的私密词牌是【{word}】。只能描述特征、场景或关系，禁止在公开频道直接说出词牌。",
+                    f"Your private word is [{word}]. Describe features, situations, or relations without saying the word in public.",
+                )
+            self.boundary.private(
+                day=0,
+                phase=self.phase,
+                recipient=player.player_id,
+                text=text,
+            )
+        if self.config.role_preset == "ghost_blank":
+            ghost_ids = self._wolf_ids(alive_only=False)
+            ghost_names = "、".join(
+                self._player_label(self._by_id[player_id]) for player_id in ghost_ids
+            )
+            self.boundary.werewolves(
+                day=0,
+                phase=self.phase,
+                recipients=ghost_ids,
+                text=self._t(
+                    f"你的无词幽灵队友名单：{ghost_names}。你们没有私聊或夜间行动；"
+                    "任一无词幽灵被投出时，都有一次猜水民词牌的机会，猜中立即获胜。",
+                    f"Blank-Ghost roster: {ghost_names}. You have no private chat or night action. "
+                    "Whenever a Blank Ghost is eliminated, that player gets one guess at the "
+                    "Water Civilians' word; a correct guess wins immediately.",
+                ),
+            )
 
     def _setup_shared_players(self) -> None:
         """Reveal the two Shared Players only to each other."""
@@ -986,6 +1130,7 @@ class Game:
         self._medium_turn()
         self._lover_turn()
         victim = self._werewolf_turn()
+        self._police_turn()
         protected = self._bodyguard_turn()
         divined = self._seer_turn()
         saved, poisoned = self._witch_turn(victim)
@@ -1106,8 +1251,8 @@ class Game:
                     ActionRequest(
                         ActionKind.TEAM_CHAT,
                         self._t(
-                            "请给狼人队友发送一条私密消息。",
-                            "Send one private message to your werewolf team.",
+                            f"请给{self._adversary_team_name()}发送一条私密消息。",
+                            f"Send one private message to your {self._adversary_team_name()}.",
                         ),
                     ),
                 )
@@ -1130,8 +1275,8 @@ class Game:
                 ActionRequest(
                     ActionKind.WOLF_KILL,
                     self._t(
-                        "选择今晚要袭击的玩家。",
-                        "Choose tonight's attack target.",
+                        f"选择今晚{self._adversary_attack_verb()}的玩家。",
+                        f"Choose tonight's {self._adversary_attack_noun()} target.",
                     ),
                     options,
                     allow_abstain=True,
@@ -1150,11 +1295,75 @@ class Game:
             phase=self.phase,
             recipients=recipients,
             text=self._t(
-                f"狼队最终袭击目标：{target_name}。",
-                f"Final attack target: {target_name}.",
+                f"{self._adversary_team_name()}最终目标：{target_name}。",
+                f"Final {self._adversary_team_name()} target: {target_name}.",
             ),
         )
         return target
+
+    def _police_turn(self) -> None:
+        """Let the living Police coordinate and resolve one shared inspection."""
+        police = [
+            self._by_id[player_id] for player_id in self._police_ids(alive_only=True)
+        ]
+        if not police:
+            return
+        recipients = tuple(player.player_id for player in police)
+        for officer in police:
+            response = self._act(
+                officer,
+                ActionRequest(
+                    ActionKind.TEAM_CHAT,
+                    self._t(
+                        "请给警察队友发送一条私密查证建议。",
+                        "Send one private investigation suggestion to the Police team.",
+                    ),
+                ),
+            )
+            if response.text.strip():
+                self.boundary.police(
+                    day=self.day,
+                    phase=self.phase,
+                    recipients=recipients,
+                    sender=officer.name,
+                    text=self._sender_event_text(officer, response.text.strip()),
+                )
+        candidates = [
+            player for player in self._alive() if player.role is not Role.POLICE
+        ]
+        options = self._options(candidates)
+        votes: list[str] = []
+        for officer in police:
+            response = self._act(
+                officer,
+                ActionRequest(
+                    ActionKind.POLICE_INSPECT,
+                    self._t(
+                        "选择今晚警队要查证的一名非警察玩家。",
+                        "Choose one non-police player for tonight's team investigation.",
+                    ),
+                    options,
+                ),
+            )
+            if response.choice:
+                votes.append(response.choice)
+        target_id = self._plurality(votes)
+        if target_id is None:
+            return
+        target = self._by_id[target_id]
+        result = self._t(
+            "杀手" if target.role is Role.WEREWOLF else "非杀手",
+            "killer" if target.role is Role.WEREWOLF else "not a killer",
+        )
+        self.boundary.police(
+            day=self.day,
+            phase=self.phase,
+            recipients=recipients,
+            text=self._t(
+                f"警队查证结果：{self._player_label(target)} 是【{result}】。",
+                f"Police investigation: {self._player_label(target)} is [{result}].",
+            ),
+        )
 
     def _seer_turn(self) -> str | None:
         """Resolve inspection and return a Fox killed by divination, if any."""
@@ -1289,11 +1498,19 @@ class Game:
             )
         self._announce(announcement)
         for player in speakers:
+            prompt = (
+                self._t(
+                    "请描述你的私密词牌，或在无词时根据已有描述进行伪装；禁止直接说出你猜到或拿到的词。",
+                    "Describe your private word, or blend in from existing clues if you have no word. Never say the word you received or inferred directly.",
+                )
+                if self._is_ghost_mode()
+                else self._t("请发表本轮公开发言。", "Give your public statement.")
+            )
             response = self._act(
                 player,
                 ActionRequest(
                     ActionKind.SPEAK,
-                    self._t("请发表本轮公开发言。", "Give your public statement."),
+                    prompt,
                     requires_text=True,
                 ),
             )
@@ -1482,6 +1699,8 @@ class Game:
         queue = list(newly_dead)
         while queue:
             player, causes = queue.pop(0)
+            if self._ghost_guess(player, causes):
+                return
             partner = self._by_id.get(player.lover_id) if player.lover_id else None
             if partner is not None and partner.alive:
                 partner.alive = False
@@ -1544,15 +1763,68 @@ class Game:
                     )
                     queue.append((victim, {DeathCause.HUNTER}))
 
+    def _ghost_guess(
+        self,
+        player: PlayerState,
+        causes: set[DeathCause],
+    ) -> bool:
+        """Give an eliminated Blank Ghost one exact-word chance to steal the game."""
+        if (
+            self.config.role_preset != "ghost_blank"
+            or player.role is not Role.WEREWOLF
+            or DeathCause.VOTE not in causes
+            or self._ghost_word_pair is None
+            or self._ghost_guess_won
+        ):
+            return False
+        response = self._act(
+            player,
+            ActionRequest(
+                ActionKind.GHOST_GUESS,
+                self._t(
+                    "你作为无词幽灵被投出。现在有最后一次猜词机会：只填写一个你认为完整准确的水民词牌，猜中幽灵队立即获胜。",
+                    "You were eliminated as a Blank Ghost. You have one final guess: provide only the exact Water Civilian word. A correct guess wins immediately for the Ghost team.",
+                ),
+                requires_text=True,
+            ),
+        )
+        guess = response.text.strip()
+        water_word = self._ghost_word_pair[0]
+        correct = self._normalized_word_guess(guess) == self._normalized_word_guess(
+            water_word,
+        )
+        if correct:
+            self._ghost_guess_won = True
+            self._announce(
+                self._t(
+                    f"{self._player_label(player)} 猜词【{guess}】正确，无词幽灵翻盘成功！",
+                    f"{self._player_label(player)} correctly guessed [{guess}]. The Blank Ghosts steal the win!",
+                ),
+            )
+            return True
+        self._announce(
+            self._t(
+                f"{self._player_label(player)} 猜词【{guess}】错误，游戏继续。",
+                f"{self._player_label(player)} guessed [{guess}] incorrectly. The game continues.",
+            ),
+        )
+        return False
+
+    @staticmethod
+    def _normalized_word_guess(value: str) -> str:
+        """Normalize harmless typography while preserving exact-word semantics."""
+        normalized = unicodedata.normalize("NFKC", value).strip().casefold()
+        return normalized.strip(" \t\r\n【】[]「」『』“”\"'，。,.！？!?")
+
     def _with_role_reveal(
         self,
         announcement: str,
         deaths: list[tuple[PlayerState, set[DeathCause]]],
     ) -> str:
         """Append role reveals for exactly the newly dead players when enabled."""
-        if not self.config.rules.reveal_roles_on_death:
+        if not self._reveals_roles_on_death():
             return announcement
-        role_names = localized(ROLE_NAMES, self.config.language)
+        role_names = self._role_names()
         reveal = "；".join(
             f"{self._player_label(player)}={role_names[player.role]}"
             for player, _ in deaths
@@ -1566,6 +1838,11 @@ class Game:
         while later night deaths and players shot by the Hunter leave silently.
         Each category remains configurable as a house rule.
         """
+        if self._is_ghost_mode():
+            # Word secrecy must survive an elimination. A revealed Water
+            # Civilian cannot be allowed to say the answer as final words;
+            # Blank Ghosts receive their dedicated one-word guess instead.
+            return False
         rules = self.config.rules
         if not rules.last_words:
             return False
@@ -2221,7 +2498,12 @@ class Game:
         detail: str,
     ) -> str:
         """Keep private actors and abilities out of resumable terminal errors."""
-        public_kinds = {ActionKind.SPEAK, ActionKind.LAST_WORDS, ActionKind.VOTE}
+        public_kinds = {
+            ActionKind.SPEAK,
+            ActionKind.LAST_WORDS,
+            ActionKind.VOTE,
+            ActionKind.GHOST_GUESS,
+        }
         safe_detail = self._safe_error_summary(detail)
         if request.kind in public_kinds:
             return (
@@ -2386,7 +2668,12 @@ class Game:
         """Expose degradation without leaking the actor behind a private action."""
         if not self.config.spectator_progress:
             return
-        public_kinds = {ActionKind.SPEAK, ActionKind.LAST_WORDS, ActionKind.VOTE}
+        public_kinds = {
+            ActionKind.SPEAK,
+            ActionKind.LAST_WORDS,
+            ActionKind.VOTE,
+            ActionKind.GHOST_GUESS,
+        }
         if request.kind in public_kinds:
             text = self._t(
                 f"{self._player_label(player)} 的公开动作已使用系统安全后备。",
@@ -2485,21 +2772,22 @@ class Game:
         request: ActionRequest,
     ) -> str:
         """Describe action progress without revealing role identities or targets."""
-        if request.kind is ActionKind.SPEAK:
-            return self._t(
-                f"{self._player_label(player)} 正在组织公开发言……",
-                f"{self._player_label(player)} is preparing a public statement...",
-            )
-        if request.kind is ActionKind.LAST_WORDS:
-            return self._t(
-                f"{self._player_label(player)} 正在组织遗言……",
-                f"{self._player_label(player)} is preparing final words...",
-            )
-        if request.kind is ActionKind.VOTE:
-            return self._t(
-                f"{self._player_label(player)} 正在提交公开投票……",
-                f"{self._player_label(player)} is submitting a public vote...",
-            )
+        public_progress = {
+            ActionKind.SPEAK: (
+                "正在组织公开发言……",
+                "is preparing a public statement...",
+            ),
+            ActionKind.LAST_WORDS: ("正在组织遗言……", "is preparing final words..."),
+            ActionKind.VOTE: ("正在提交公开投票……", "is submitting a public vote..."),
+            ActionKind.GHOST_GUESS: (
+                "正在提交最后的公开猜词……",
+                "is submitting a final public word guess...",
+            ),
+        }
+        progress = public_progress.get(request.kind)
+        if progress is not None:
+            label = self._player_label(player)
+            return self._t(f"{label} {progress[0]}", f"{label} {progress[1]}")
         if self.phase == "setup":
             return self._t(
                 "开局私密能力正在处理中……",
@@ -2516,8 +2804,8 @@ class Game:
         )
 
     def _view(self, player: PlayerState) -> PlayerView:
-        role_names = localized(ROLE_NAMES, self.config.language)
-        role_descriptions = localized(ROLE_DESCRIPTIONS, self.config.language)
+        role_names = self._role_names()
+        role_descriptions = self._role_descriptions()
         return PlayerView(
             player_id=player.player_id,
             name=player.name,
@@ -2546,6 +2834,8 @@ class Game:
             ),
             mechanical_context=self._mechanical_context(),
             strategy=player.memory.strategy,
+            game_name=self._game_name(),
+            adversary_name=self._adversary_name(),
         )
 
     def _record_nonterminal_snapshot(self, reason: str) -> None:
@@ -2580,19 +2870,79 @@ class Game:
         ]
         english_roster = f" ({', '.join(alive_labels)})" if alive_labels else ""
         chinese_roster = f"（{'、'.join(alive_labels)}）" if alive_labels else ""
+        if self.config.role_preset == "killer":
+            return self._killer_mechanical_context(
+                day,
+                alive_count,
+                english_roster,
+                chinese_roster,
+            )
+        if self._is_ghost_mode():
+            return self._ghost_mechanical_context(
+                day,
+                alive_count,
+                english_roster,
+                chinese_roster,
+            )
         if self.config.language == "en":
             return (
                 f"Last completed win check: Day {day}, {alive_count} players were alive "
-                f"and the game continued, so at most {max_wolves} living werewolves "
+                f"and the game continued, so at most {max_wolves} living "
+                f"{self._adversary_name().lower()} players "
                 f"were possible in that exact snapshot{english_roster}. "
                 "Any claimed role world must "
                 "respect this deterministic parity fact."
             )
         return (
             f"最近一次已完成的胜负检查：第 {day} 天有 {alive_count} 人存活且游戏继续，"
-            f"因此该时点至多有 {max_wolves} 名存活狼人{chinese_roster}。"
+            f"因此该时点至多有 {max_wolves} 名存活{self._adversary_name()}"
+            f"{chinese_roster}。"
             "任何身份组合都必须符合这条"
             "确定性的即时胜负约束。"
+        )
+
+    def _killer_mechanical_context(
+        self,
+        day: int,
+        alive_count: int,
+        english_roster: str,
+        chinese_roster: str,
+    ) -> str:
+        """Render the last nonterminal Killer-game edge constraints."""
+        if self.config.language == "en":
+            return (
+                f"Last completed win check: Day {day}, {alive_count} players were "
+                f"alive and the game continued{english_roster}. Therefore at "
+                "least one Killer, one Police player, and one Civilian were alive "
+                "in that exact snapshot. Every role theory must respect both "
+                "Killer-game edge-elimination conditions."
+            )
+        return (
+            f"最近一次已完成的胜负检查：第 {day} 天有 {alive_count} 人存活且游戏继续"
+            f"{chinese_roster}。因此该时点至少各有一名杀手、警察和平民存活；"
+            "任何身份组合都必须同时符合杀人游戏的两条屠边终局条件。"
+        )
+
+    def _ghost_mechanical_context(
+        self,
+        day: int,
+        alive_count: int,
+        english_roster: str,
+        chinese_roster: str,
+    ) -> str:
+        """Render the last nonterminal Ghost-game survival constraints."""
+        if self.config.language == "en":
+            return (
+                f"Last completed win check: Day {day}, {alive_count} players were "
+                f"alive and the game continued{english_roster}. Therefore at "
+                "least one Ghost and at least two Water Civilians were alive in "
+                "that exact snapshot. Ghost survival does not trigger merely when "
+                "the hostile side reaches ordinary parity."
+            )
+        return (
+            f"最近一次已完成的胜负检查：第 {day} 天有 {alive_count} 人存活且游戏继续"
+            f"{chinese_roster}。因此该时点至少有一名幽灵和两名水民存活；"
+            "捉鬼不会仅因敌对人数达到其余人数就提前结束。"
         )
 
     def _announce(self, text: str) -> None:
@@ -2636,6 +2986,10 @@ class Game:
         wolves = sum(
             player.alive and player.role is Role.WEREWOLF for player in self.players
         )
+        if self.config.role_preset == "killer":
+            return self._killer_winner(wolves)
+        if self._is_ghost_mode():
+            return self._ghost_winner(wolves)
         non_wolves = sum(
             player.alive and player.role is not Role.WEREWOLF for player in self.players
         )
@@ -2652,6 +3006,33 @@ class Game:
         if len(lovers) == 2 and all(player.alive for player in lovers):
             return Faction.LOVERS
         return base_winner
+
+    def _killer_winner(self, killers: int) -> Faction | None:
+        """Apply the Police-version edge-elimination victory conditions."""
+        police = sum(
+            player.alive and player.role is Role.POLICE for player in self.players
+        )
+        civilians = sum(
+            player.alive and player.role is Role.VILLAGER for player in self.players
+        )
+        if killers == 0:
+            return Faction.GOOD
+        if police == 0 or civilians == 0:
+            return Faction.WEREWOLF
+        return None
+
+    def _ghost_winner(self, ghosts: int) -> Faction | None:
+        """Apply word-game survival rules after any Blank-Ghost guess chance."""
+        if self.config.role_preset == "ghost_blank" and self._ghost_guess_won:
+            return Faction.WEREWOLF
+        water_civilians = sum(
+            player.alive and player.role is Role.VILLAGER for player in self.players
+        )
+        if ghosts == 0:
+            return Faction.GOOD
+        if water_civilians <= 1:
+            return Faction.WEREWOLF
+        return None
 
     def _winning_players(self, winner: Faction | None) -> tuple[str, ...]:
         """List seats that satisfy faction and mode-specific survival conditions."""
@@ -2684,7 +3065,7 @@ class Game:
                 for player in winners
                 if player.role is not Role.MADMAN or player.alive
             ]
-        if self.config.role_preset != "classic":
+        if self._is_movie_mode():
             winners = [player for player in winners if player.alive]
         return tuple(player.name for player in winners)
 
@@ -2693,7 +3074,7 @@ class Game:
         winning_players: tuple[str, ...],
     ) -> tuple[tuple[str, float], ...]:
         """Split a normalized movie prize pool equally among surviving winners."""
-        if self.config.role_preset == "classic" or not winning_players:
+        if not self._is_movie_mode() or not winning_players:
             return ()
         share = 1 / len(winning_players)
         return tuple((name, share) for name in winning_players)
@@ -2701,9 +3082,15 @@ class Game:
     def _finish(self, winner: Faction | None, reason: str) -> GameResult:
         self.phase = "finished"
         if winner is Faction.GOOD:
-            outcome = self._t("好人阵营获胜！", "The good faction wins!")
+            outcome = self._t(
+                f"{self._good_faction_name()}获胜！",
+                f"The {self._good_faction_name()} win!",
+            )
         elif winner is Faction.WEREWOLF:
-            outcome = self._t("狼人阵营获胜！", "The werewolf faction wins!")
+            outcome = self._t(
+                f"{self._adversary_team_name()}获胜！",
+                f"The {self._adversary_team_name()} win!",
+            )
         elif winner is Faction.FOX:
             outcome = self._t("妖狐独自获胜！", "The Fox wins alone!")
         elif winner is Faction.LOVERS:
@@ -2716,7 +3103,7 @@ class Game:
                 "达到最大天数，本局平局。",
                 "Maximum days reached; the game is a draw.",
             )
-        role_names = localized(ROLE_NAMES, self.config.language)
+        role_names = self._role_names()
         reveal = "；".join(
             f"{self._player_label(player)}={role_names[player.role]}"
             for player in self.players
@@ -2750,7 +3137,7 @@ class Game:
                 f"奖金分配：{len(prize_shares)} 名存活获胜者均分奖金池，每人 {share_percent}%。",
                 f"Prize split: {len(prize_shares)} surviving winners receive {share_percent}% each.",
             )
-        elif self.config.role_preset != "classic" and winner is not None:
+        elif self._is_movie_mode() and winner is not None:
             prize_text = self._t(
                 "阵营终局条件已经达成，但没有符合生存条件的获胜者，奖金无人领取。",
                 "A faction end condition was reached, but no eligible survivor can claim the prize.",
@@ -2761,6 +3148,7 @@ class Game:
             f"全部身份：{reveal}。",
             f"All roles: {reveal}.",
         )
+        ghost_words_text = self._ghost_word_reveal()
         self._announce(
             " ".join(
                 part
@@ -2770,6 +3158,7 @@ class Game:
                     prize_text,
                     roles_text,
                     lover_reveal,
+                    ghost_words_text,
                 )
                 if part
             ),
@@ -2941,6 +3330,136 @@ class Game:
             truncated = player.player_id
         return f"{prefix}{truncated}{hash_suffix}{suffix}"
 
+    def _is_movie_mode(self) -> bool:
+        """Return whether the preset uses survivor-only movie prize rules."""
+        return self.config.role_preset.startswith("movie_")
+
+    def _is_ghost_mode(self) -> bool:
+        """Return whether the match is one of the daytime-only ghost variants."""
+        return self.config.role_preset in {"ghost_similar", "ghost_blank"}
+
+    def _reveals_roles_on_death(self) -> bool:
+        """Apply mandatory flip rules for Killer and Ghost presets."""
+        return self.config.rules.reveal_roles_on_death or self.config.role_preset in {
+            "killer",
+            "ghost_similar",
+            "ghost_blank",
+        }
+
+    def _game_name(self) -> str:
+        names = {
+            "killer": self._t("杀人游戏", "Killer Game"),
+            "ghost_similar": self._t("捉鬼游戏·近义词版", "Ghost Hunt: Similar Words"),
+            "ghost_blank": self._t("捉鬼游戏·无词版", "Ghost Hunt: Blank Ghosts"),
+        }
+        return names.get(self.config.role_preset, self._t("狼人杀", "Werewolf"))
+
+    def _adversary_name(self) -> str:
+        if self.config.role_preset == "killer":
+            return self._t("杀手", "Killer")
+        if self._is_ghost_mode():
+            return self._t("幽灵", "Ghost")
+        return self._t("狼人", "Werewolf")
+
+    def _adversary_team_name(self) -> str:
+        if self.config.language == "en":
+            return f"{self._adversary_name()} team"
+        return f"{self._adversary_name()}队"
+
+    def _good_faction_name(self) -> str:
+        if self.config.role_preset == "killer":
+            return self._t("警民阵营", "Police and Civilians")
+        if self._is_ghost_mode():
+            return self._t("水民阵营", "Water Civilians")
+        return self._t("好人阵营", "good faction")
+
+    def _adversary_attack_verb(self) -> str:
+        return self._t(
+            "行凶" if self.config.role_preset == "killer" else "袭击",
+            "murder" if self.config.role_preset == "killer" else "attack",
+        )
+
+    def _adversary_attack_noun(self) -> str:
+        return self._adversary_attack_verb()
+
+    def _role_names(self) -> dict[Role, str]:
+        """Return role labels themed for the active social-deduction mode."""
+        names = localized(ROLE_NAMES, self.config.language).copy()
+        if self.config.role_preset == "killer":
+            names.update(
+                {
+                    Role.WEREWOLF: self._t("杀手", "Killer"),
+                    Role.POLICE: self._t("警察", "Police"),
+                    Role.VILLAGER: self._t("平民", "Civilian"),
+                },
+            )
+        elif self._is_ghost_mode():
+            names.update(
+                {
+                    Role.WEREWOLF: self._t("幽灵", "Ghost"),
+                    Role.VILLAGER: self._t("水民", "Water Civilian"),
+                },
+            )
+        return names
+
+    def _role_descriptions(self) -> dict[Role, str]:
+        """Return mechanics text without leaking terminology from another mode."""
+        descriptions = localized(ROLE_DESCRIPTIONS, self.config.language).copy()
+        if self.config.role_preset == "killer":
+            descriptions.update(
+                {
+                    Role.WEREWOLF: self._t(
+                        "夜间与杀手队友私聊并共同杀害一名非杀手，白天隐藏身份；屠光警察或平民即可获胜。",
+                        "Coordinate with the Killer team to murder one non-killer at night; win by eliminating every Police player or every Civilian.",
+                    ),
+                    Role.POLICE: self._t(
+                        "夜间与警察队友私聊并共同查证一名非警察，结果只区分杀手与非杀手。",
+                        "Coordinate with the Police team to investigate one non-police player each night; the result only distinguishes killer from non-killer.",
+                    ),
+                    Role.VILLAGER: self._t(
+                        "没有夜间能力；通过发言、票型和警察查证抓出全部杀手，同时保护警察与平民边。",
+                        "You have no night ability. Use discussion, votes, and Police results to eliminate every Killer while protecting both good-side role groups.",
+                    ),
+                },
+            )
+        elif self._is_ghost_mode():
+            ghost_description = (
+                self._t(
+                    "你没有词牌，但知道另一名无词幽灵；根据公开描述猜词并伪装。被投出时可猜一次水民词，猜中立即获胜；没有夜间行动。",
+                    "You have no word but know the other Blank Ghost. Infer the word and blend in; if eliminated, one correct guess wins immediately. There is no night action.",
+                )
+                if self.config.role_preset == "ghost_blank"
+                else self._t(
+                    "你获得与水民相关但不同的词牌，且不知道另一名幽灵；根据描述差异伪装，没有夜间行动。",
+                    "You receive a related but different word and do not know the other Ghost. Blend in through clue differences; there is no night action.",
+                )
+            )
+            descriptions.update(
+                {
+                    Role.WEREWOLF: ghost_description,
+                    Role.VILLAGER: self._t(
+                        "白天谨慎描述私密词牌并比较词义偏差，投出全部幽灵；没有夜间行动。",
+                        "Describe the private word carefully, compare semantic mismatches, and vote out every Ghost; there is no night action.",
+                    ),
+                },
+            )
+        return descriptions
+
+    def _ghost_word_reveal(self) -> str:
+        """Reveal the private clue setup only after a Ghost match has ended."""
+        if not self._is_ghost_mode() or self._ghost_word_pair is None:
+            return ""
+        water_word, ghost_word = self._ghost_word_pair
+        if ghost_word:
+            return self._t(
+                f"词牌揭晓：水民【{water_word}】，幽灵【{ghost_word}】。",
+                f"Words: Water Civilians [{water_word}], Ghosts [{ghost_word}].",
+            )
+        return self._t(
+            f"词牌揭晓：水民【{water_word}】，幽灵没有词牌。",
+            f"Words: Water Civilians [{water_word}], Ghosts had no word.",
+        )
+
     def _alive(self) -> list[PlayerState]:
         return [player for player in self.players if player.alive]
 
@@ -2949,6 +3468,13 @@ class Game:
             player.player_id
             for player in self.players
             if player.role is Role.WEREWOLF and (player.alive or not alive_only)
+        ]
+
+    def _police_ids(self, *, alive_only: bool) -> list[str]:
+        return [
+            player.player_id
+            for player in self.players
+            if player.role is Role.POLICE and (player.alive or not alive_only)
         ]
 
     def _options(self, players: Iterable[PlayerState]) -> tuple[ActionOption, ...]:
