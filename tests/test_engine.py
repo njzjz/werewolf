@@ -1435,6 +1435,76 @@ def test_checkpoint_resume_preserves_movie_board_skills(tmp_path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "changed_config",
+    [
+        lambda config: replace(
+            config,
+            providers={
+                "test": replace(
+                    config.providers["test"],
+                    base_url="https://other-provider.invalid/v1",
+                ),
+            },
+        ),
+        lambda config: replace(
+            config,
+            providers={
+                "test": replace(config.providers["test"], model="other-model"),
+            },
+        ),
+        lambda config: replace(
+            config,
+            players=(
+                replace(config.players[0], persona="changed private persona"),
+                *config.players[1:],
+            ),
+        ),
+    ],
+)
+def test_checkpoint_pins_provider_trust_and_private_prompt_inputs(
+    tmp_path,
+    changed_config,
+) -> None:
+    """Resume must reject endpoint, model, or prompt-identity substitutions."""
+    checkpoint = tmp_path / "private.checkpoint.json"
+    config = llm_seat_config(checkpoint_path=str(checkpoint))
+    game = Game(config, terminal=SilentTerminal())
+    game._save_checkpoint(next_day=1, next_step="night")  # noqa: SLF001
+
+    with pytest.raises(ValueError, match="does not match"):
+        Game(
+            changed_config(config),
+            terminal=SilentTerminal(),
+            resume_checkpoint=checkpoint,
+        )
+
+
+def test_checkpoint_normalizes_default_provider_ports(tmp_path) -> None:
+    """Equivalent HTTPS origins should not fail solely on an explicit port 443."""
+    checkpoint = tmp_path / "private.checkpoint.json"
+    config = llm_seat_config(checkpoint_path=str(checkpoint))
+    game = Game(config, terminal=SilentTerminal())
+    game._save_checkpoint(next_day=1, next_step="night")  # noqa: SLF001
+    equivalent = replace(
+        config,
+        providers={
+            "test": replace(
+                config.providers["test"],
+                base_url="https://example.invalid:443/another-root",
+            ),
+        },
+    )
+
+    resumed = Game(
+        equivalent,
+        terminal=SilentTerminal(),
+        resume_checkpoint=checkpoint,
+    )
+
+    assert resumed._resume_step == "night"  # noqa: SLF001
+
+
 def test_madman_stays_out_of_wolf_chat_and_wins_with_werewolves() -> None:
     """Madmen appear village-side and share victory, but never wolf secrets."""
     roles = [

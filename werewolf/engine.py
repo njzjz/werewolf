@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from .agents import (
     BotController,
@@ -300,7 +301,7 @@ class Game:
             raise FileExistsError(msg)
 
     def _config_signature(self) -> dict[str, object]:
-        """Return non-secret configuration fields that must match on resume."""
+        """Return non-secret behavior and provider trust fields pinned on resume."""
         return {
             "language": self.config.language,
             "role_preset": self.config.role_preset,
@@ -315,9 +316,36 @@ class Game:
                     "name": seat.name,
                     "controller": seat.controller,
                     "provider": seat.provider,
+                    "provider_trust": self._provider_trust_signature(seat.provider),
+                    "persona": seat.persona,
+                    "skills": list(seat.skills),
                 }
                 for seat in self.config.players
             ],
+        }
+
+    def _provider_trust_signature(
+        self,
+        provider_name: str | None,
+    ) -> dict[str, object] | None:
+        """Pin where private history may be sent without storing credentials."""
+        if provider_name is None:
+            return None
+        provider = self.config.providers[provider_name]
+        parsed = urlsplit(provider.base_url)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+            msg = f"Provider {provider_name!r} has an invalid base_url"
+            raise ValueError(msg)
+        host = parsed.hostname.lower()
+        if ":" in host:
+            host = f"[{host}]"
+        port = parsed.port
+        default_port = 443 if parsed.scheme == "https" else 80
+        authority = host if port in {None, default_port} else f"{host}:{port}"
+        return {
+            "origin": f"{parsed.scheme.lower()}://{authority}",
+            "wire_api": provider.wire_api,
+            "model": provider.model,
         }
 
     def _checkpoint_payload(
@@ -335,7 +363,7 @@ class Game:
             else None
         )
         return {
-            "version": 1,
+            "version": 2,
             "config_signature": self._config_signature(),
             "next_day": next_day,
             "next_step": next_step,
@@ -430,7 +458,7 @@ class Game:
     def _load_checkpoint(self, path: Path) -> None:
         """Restore a safe phase boundary and its per-action response journal."""
         raw = json.loads(path.read_text(encoding="utf-8"))
-        if raw.get("version") != 1:
+        if raw.get("version") != 2:
             msg = f"Unsupported checkpoint version in {path}"
             raise ValueError(msg)
         if raw.get("config_signature") != self._config_signature():
@@ -489,7 +517,7 @@ class Game:
         self._antidote_available = bool(raw["antidote_available"])
         self._poison_available = bool(raw["poison_available"])
         self._last_exiled_id = raw.get("last_exiled_id")
-        # Version-1 checkpoints written before death-anchored discussion order
+        # Older checkpoints written before death-anchored discussion order
         # do not contain this field. Defaulting to ``None`` only affects the
         # opening discussion of a resumed game, which then uses the seeded
         # random start as it did before.
@@ -1805,7 +1833,7 @@ class Game:
         if isinstance(side_effects, dict):
             self._apply_action_side_effects(player, entry)
         else:
-            # Version-1 journals written before transactional side effects
+            # Older journals written before transactional side effects
             # assumed the result had already been displayed. Preserve that
             # behavior while rebuilding the old memory representation.
             private_note = "\n".join(
