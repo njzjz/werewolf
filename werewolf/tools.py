@@ -14,6 +14,7 @@ from typing import Any, NoReturn
 
 from .models import (
     ROLE_NAMES,
+    ActionRequest,
     MemoryEvent,
     PlayerView,
     Visibility,
@@ -116,10 +117,85 @@ class PlayerToolbox:
                 "additionalProperties": False,
             },
         ),
+        ToolSpec(
+            name="get_vote_analysis",
+            description=(
+                "Convert visible public vote announcements into structured rounds, "
+                "per-player vote histories, target coalitions, and target switches. "
+                "This reports behavior only and never labels a faction."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        ),
+        ToolSpec(
+            name="get_claim_matrix",
+            description=(
+                "Organize public role mentions, explicit self-claims, and explicit "
+                "denials by speaker and event sequence. Every item remains an "
+                "unverified public claim rather than a judge-confirmed role."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        ),
+        ToolSpec(
+            name="review_action_draft",
+            description=(
+                "Review a proposed action before the final answer. Check the exact "
+                "choice value, required text, cited visible evidence sequences, "
+                "counter-case, and follow-up plan. Revise the final JSON when this "
+                "tool reports issues."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "choice": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Draft exact option value, or null only for abstention.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Draft channel text, possibly empty for choice-only actions.",
+                    },
+                    "evidence_sequences": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "maxItems": 8,
+                        "description": "Visible event sequence numbers supporting the draft.",
+                    },
+                    "counter_case": {
+                        "type": "string",
+                        "description": "Strongest plausible alternative explanation.",
+                    },
+                    "plan": {
+                        "type": "string",
+                        "description": "What to verify or do after this action.",
+                    },
+                },
+                "required": [
+                    "choice",
+                    "text",
+                    "evidence_sequences",
+                    "counter_case",
+                    "plan",
+                ],
+                "additionalProperties": False,
+            },
+        ),
     )
 
-    def __init__(self, view: PlayerView) -> None:
+    def __init__(
+        self,
+        view: PlayerView,
+        request: ActionRequest | None = None,
+    ) -> None:
         self.view = view
+        self.request = request
         self._players = {
             player_id: {
                 "player_id": player_id,
@@ -135,6 +211,16 @@ class PlayerToolbox:
         """Return immutable tool definitions safe to send to the provider."""
         return self.SPECS
 
+    @property
+    def evidence_specs(self) -> tuple[ToolSpec, ...]:
+        """Return retrieval and analysis tools used before drafting an action."""
+        return tuple(spec for spec in self.SPECS if spec.name != "review_action_draft")
+
+    @property
+    def review_spec(self) -> ToolSpec:
+        """Return the single deterministic draft-review tool definition."""
+        return next(spec for spec in self.SPECS if spec.name == "review_action_draft")
+
     def execute(self, name: str, raw_arguments: str) -> str:
         """Run one known tool and return a bounded JSON result for the model."""
         try:
@@ -146,6 +232,14 @@ class PlayerToolbox:
                 result = self._search_visible_history(arguments)
             elif name == "get_player_dossier":
                 result = self._player_dossier(arguments)
+            elif name == "get_vote_analysis":
+                self._reject_extra(arguments, set())
+                result = self._vote_analysis()
+            elif name == "get_claim_matrix":
+                self._reject_extra(arguments, set())
+                result = self._claim_matrix()
+            elif name == "review_action_draft":
+                result = self._review_action_draft(arguments)
             else:
                 self._invalid(f"Unknown tool {name!r}")
         except (KeyError, ToolInputError, TypeError, ValueError) as exc:
@@ -250,6 +344,30 @@ class PlayerToolbox:
                 }
                 for thought in self.view.thoughts[-6:]
             ],
+            "structured_strategy_state": self._strategy_state(),
+        }
+
+    def _strategy_state(self) -> dict[str, Any]:
+        strategy = self.view.strategy
+        return {
+            "updated_day": strategy.day,
+            "updated_phase": strategy.phase,
+            "beliefs": [
+                {
+                    "player_id": belief.player_id,
+                    "suspicion": belief.suspicion,
+                    "confidence": belief.confidence,
+                    "evidence_sequences": list(belief.evidence_sequences),
+                    "rationale": self._bounded_text(belief.rationale, limit=220),
+                }
+                for belief in strategy.beliefs
+            ],
+            "open_questions": [
+                self._bounded_text(question, limit=160)
+                for question in strategy.open_questions
+            ],
+            "plan": self._bounded_text(strategy.plan, limit=240),
+            "counter_case": self._bounded_text(strategy.counter_case, limit=240),
         }
 
     @staticmethod
@@ -259,7 +377,7 @@ class PlayerToolbox:
             if "→" not in segment:
                 continue
             voter, target = segment.rsplit("→", 1)
-            voter = voter.split("：")[-1].strip()
+            voter = voter.split("：")[-1].split("Public votes:")[-1].strip()
             if voter and target.strip():
                 pairs.append({"voter": voter, "target": target.strip()})
         return pairs
@@ -361,6 +479,181 @@ class PlayerToolbox:
             "private_visible_mentions": [
                 self._event(event, text_limit=280) for event in private_mentions[-6:]
             ],
+        }
+
+    def _player_id_for_reference(self, value: str) -> str | None:
+        """Resolve only exact public identifiers, names, and rendered labels."""
+        clean = value.replace("（后备）", "").replace(" (fallback)", "").strip()
+        for player_id, player in self._players.items():
+            if clean in {player_id, str(player["name"]), str(player["label"])}:
+                return player_id
+        return None
+
+    def _vote_analysis(self) -> dict[str, Any]:
+        rounds: list[dict[str, Any]] = []
+        history: dict[str, list[str | None]] = {}
+        for event in self.view.events:
+            if event.visibility is not Visibility.PUBLIC or not (
+                "公开投票结果" in event.text or "Public votes:" in event.text
+            ):
+                continue
+            pairs: list[dict[str, Any]] = []
+            coalitions: dict[str, list[str]] = {}
+            for pair in self._vote_pairs(event.text):
+                voter_id = self._player_id_for_reference(pair["voter"])
+                raw_target = pair["target"].rstrip(".")
+                target_id = self._player_id_for_reference(raw_target)
+                if voter_id is None:
+                    continue
+                abstained = raw_target in {"弃权", "abstain"}
+                normalized_target = None if abstained else target_id
+                pairs.append(
+                    {
+                        "voter_id": voter_id,
+                        "target_id": normalized_target,
+                        "target_label": raw_target,
+                    },
+                )
+                history.setdefault(voter_id, []).append(normalized_target)
+                coalition_key = normalized_target or "abstain_or_unresolved"
+                coalitions.setdefault(coalition_key, []).append(voter_id)
+            rounds.append(
+                {
+                    "sequence": event.sequence,
+                    "day": event.day,
+                    "phase": event.phase,
+                    "pairs": pairs,
+                    "coalitions": coalitions,
+                },
+            )
+        switches = {
+            voter_id: sum(
+                previous != current for previous, current in zip(targets, targets[1:])
+            )
+            for voter_id, targets in history.items()
+        }
+        return {
+            "rounds": rounds[-8:],
+            "vote_history_by_player": history,
+            "target_switches_by_player": switches,
+            "interpretation_warning": (
+                "Vote alignment and switching are behavior, not confirmed faction evidence."
+            ),
+        }
+
+    def _claim_matrix(self) -> dict[str, Any]:
+        role_names = tuple(localized(ROLE_NAMES, self.view.language).values())
+        claims: dict[str, list[dict[str, Any]]] = {}
+        for event in self.view.events:
+            if event.visibility is not Visibility.PUBLIC or not event.sender:
+                continue
+            player_id = self._player_id_for_reference(event.sender)
+            if player_id is None:
+                continue
+            normalized = event.text.casefold()
+            for role in role_names:
+                role_text = role.casefold()
+                if role_text not in normalized:
+                    continue
+                self_claim = any(
+                    marker in normalized
+                    for marker in (
+                        f"我是{role_text}",
+                        f"我才是{role_text}",
+                        f"我就是{role_text}",
+                        f"我跳{role_text}",
+                        f"身份是{role_text}",
+                        f"i am {role_text}",
+                        f"i am the {role_text}",
+                        f"i'm {role_text}",
+                        f"my role is {role_text}",
+                    )
+                )
+                denial = any(
+                    marker in normalized
+                    for marker in (
+                        f"我不是{role_text}",
+                        f"i am not {role_text}",
+                        f"i'm not {role_text}",
+                    )
+                )
+                claims.setdefault(player_id, []).append(
+                    {
+                        "sequence": event.sequence,
+                        "day": event.day,
+                        "phase": event.phase,
+                        "role": role,
+                        "self_claim": self_claim and not denial,
+                        "explicit_denial": denial,
+                        "text": self._bounded_text(event.text, limit=260),
+                    },
+                )
+        return {
+            "claims_are_unverified": True,
+            "by_player": claims,
+        }
+
+    def _review_action_draft(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        self._reject_extra(
+            arguments,
+            {"choice", "text", "evidence_sequences", "counter_case", "plan"},
+        )
+        if self.request is None:
+            self._invalid("No current action request is available for review")
+        choice = arguments.get("choice")
+        text = arguments.get("text")
+        sequences = arguments.get("evidence_sequences")
+        counter_case = arguments.get("counter_case")
+        plan = arguments.get("plan")
+        if choice is not None and not isinstance(choice, str):
+            self._invalid("choice must be a string or null")
+        if not isinstance(text, str):
+            self._invalid("text must be a string")
+        if (
+            not isinstance(sequences, list)
+            or len(sequences) > 8
+            or not all(
+                isinstance(sequence, int) and not isinstance(sequence, bool)
+                for sequence in sequences
+            )
+        ):
+            self._invalid("evidence_sequences must contain at most 8 integers")
+        if not isinstance(counter_case, str) or not isinstance(plan, str):
+            self._invalid("counter_case and plan must be strings")
+        legal = {option.value for option in self.request.options}
+        issues: list[str] = []
+        if choice is None:
+            if self.request.options and not self.request.allow_abstain:
+                issues.append(
+                    "choice is null but this action does not allow abstention"
+                )
+        elif choice not in legal:
+            issues.append("choice is not an exact legal option value")
+        if self.request.requires_text and not text.strip():
+            issues.append("text is required but empty")
+        events = {event.sequence: event for event in self.view.events}
+        missing = sorted({sequence for sequence in sequences if sequence not in events})
+        if missing:
+            issues.append(f"evidence sequences are not visible: {missing}")
+        warnings: list[str] = []
+        if self.view.events and not sequences:
+            warnings.append("no visible evidence sequence supports the draft")
+        if self.view.events and not counter_case.strip():
+            warnings.append("counter_case is empty")
+        if not plan.strip():
+            warnings.append("follow-up plan is empty")
+        return {
+            "ready": not issues,
+            "issues": issues,
+            "warnings": warnings,
+            "validated_evidence": [
+                self._event(events[sequence], text_limit=240)
+                for sequence in dict.fromkeys(sequences)
+                if sequence in events
+            ],
+            "instruction": (
+                "Fix every issue and consider warnings before returning final JSON."
+            ),
         }
 
     @staticmethod

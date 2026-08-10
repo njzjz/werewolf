@@ -27,6 +27,7 @@ from .agents import (
     OpenAICompatibleClient,
     PrivateResultReceiver,
     ProviderHTTPError,
+    ProviderOutputLimitError,
     SafeFallbackController,
     Terminal,
 )
@@ -41,10 +42,12 @@ from .models import (
     AgentResponse,
     Faction,
     MemoryEvent,
+    PlayerBelief,
     PlayerState,
     PlayerView,
     Role,
     Skill,
+    StrategyState,
     Thought,
     Visibility,
     localized,
@@ -417,6 +420,7 @@ class Game:
                         for event in player.memory.events
                     ],
                     "thoughts": [asdict(thought) for thought in player.memory.thoughts],
+                    "strategy": asdict(player.memory.strategy),
                 }
                 for player in self.players
             ],
@@ -516,6 +520,7 @@ class Game:
                 )
                 for thought in saved.get("thoughts", [])
             ]
+            player.memory.strategy = self._strategy_from_value(saved.get("strategy"))
             max_sequence = max(
                 [max_sequence, *(event.sequence for event in player.memory.events)],
             )
@@ -1698,18 +1703,21 @@ class Game:
         heartbeat_stop = threading.Event()
         heartbeat: threading.Thread | None = None
         if pending:
+            parallel_limit = min(
+                len(pending),
+                self.config.max_parallel_llm_requests,
+            )
             if self.config.spectator_progress:
                 self.terminal.transient_progress(
                     self._t(
-                        f"正在并行收集 {len(pending)} 个互不可见的 LLM 投票……",
-                        f"Collecting {len(pending)} mutually invisible LLM votes in parallel...",
+                        f"正在以最多 {parallel_limit} 路并发收集 {len(pending)} 个"
+                        "互不可见的 LLM 投票……",
+                        f"Collecting {len(pending)} mutually invisible LLM votes "
+                        f"with up to {parallel_limit} concurrent requests...",
                     ),
                 )
             executor = ThreadPoolExecutor(
-                max_workers=min(
-                    len(pending),
-                    self.config.max_parallel_llm_requests,
-                ),
+                max_workers=parallel_limit,
             )
             for index in pending:
                 player, request = actions[index]
@@ -1874,6 +1882,7 @@ class Game:
                 text=str(response.get("text", "")),
                 thought=str(response.get("thought", "")),
                 note=str(response.get("note", "")),
+                strategy=self._optional_strategy_from_value(response.get("strategy")),
                 used_fallback=bool(response.get("used_fallback", False)),
                 fallback_error=str(response.get("fallback_error", "")),
                 attempts=int(response.get("attempts", 1)),
@@ -1890,6 +1899,8 @@ class Game:
                 part for part in (replayed.thought, replayed.note) if part.strip()
             )
             player.memory.reflect(self.day, self.phase, private_note)
+            if replayed.strategy is not None:
+                player.memory.strategy = replayed.strategy
             if legacy_private_result is not None:
                 self._deliver_private_result(
                     player,
@@ -1918,6 +1929,9 @@ class Game:
             "side_effects": {
                 "private_note": "\n".join(
                     part for part in (response.thought, response.note) if part.strip()
+                ),
+                "strategy": (
+                    asdict(response.strategy) if response.strategy is not None else None
                 ),
                 "fallback_note": self._fallback_private_note(response),
                 "private_result": private_result_text,
@@ -1957,6 +1971,9 @@ class Game:
             raise TypeError(msg)
         private_note = str(side_effects.get("private_note", ""))
         player.memory.reflect(self.day, self.phase, private_note)
+        strategy = self._optional_strategy_from_value(side_effects.get("strategy"))
+        if strategy is not None:
+            player.memory.strategy = strategy
         fallback_note = str(side_effects.get("fallback_note", ""))
         if fallback_note:
             self._record_private_fallback_note(player, fallback_note)
@@ -2011,8 +2028,20 @@ class Game:
                 raise
             except Exception as exc:
                 last_error = self._short_error(f"{type(exc).__name__}: {exc}")
-                # A transport failure gives the model nothing to correct.
-                feedback = ""
+                # Transport failures give the model nothing to correct, but an
+                # exhausted output budget can often be repaired by answering
+                # more concisely on the configured controller retry.
+                feedback = (
+                    self._t(
+                        "上一次回答被输出 token 上限截断；请显著缩短发言和私密笔记，"
+                        "确保最终 JSON 与每个句子完整结束。",
+                        "Your previous answer hit the output-token limit. Shorten "
+                        "the statement and private notes substantially, and finish "
+                        "every sentence and the final JSON.",
+                    )
+                    if isinstance(exc, ProviderOutputLimitError)
+                    else ""
+                )
                 if is_llm:
                     self._increment_metric("failures")
                 if attempt < self.config.controller_retries:
@@ -2081,9 +2110,38 @@ class Game:
             and (response.choice is not None or not request.allow_abstain)
         ):
             return f"illegal choice {response.choice!r} for {request.kind.value}"
-        if is_llm and request.requires_text and not response.text.strip():
-            return f"empty text for {request.kind.value}"
+        if is_llm and request.requires_text:
+            text = response.text.strip()
+            if not text:
+                return f"empty text for {request.kind.value}"
+            if re.fullmatch(r"(?:\.{2,}|…+|。+)", text):
+                return f"placeholder text for {request.kind.value}"
+            if self._looks_like_truncated_text(text):
+                return f"incomplete text for {request.kind.value}"
         return ""
+
+    @staticmethod
+    def _looks_like_truncated_text(text: str) -> bool:
+        """Detect likely half-sentences even when a provider reports ``stop``.
+
+        Some compatible providers close the surrounding JSON after cutting the
+        public ``text`` field, so protocol-level finish metadata cannot catch
+        the loss. Trailing continuation punctuation or ellipses are always
+        suspicious; long prose is also expected to end with sentence-closing
+        punctuation. Short commands such as ``投3号`` remain valid.
+        """
+        compact = text.rstrip()
+        if re.search(r"(?:\.{2,}|…+|[，、：；,:;])$", compact):
+            return True
+        if len(compact) >= 20 and re.search(
+            r"(?:所以|因为|但是|然而|而且|如果|虽然|不过|以及|或者|例如|比如|包括|"
+            r"理由是|重点是)$",
+            compact,
+        ):
+            return True
+        if len(compact) < 80:
+            return False
+        return re.search(r'[。！？!?…」』”"\'）)\]】]$', compact) is None
 
     def _retry_feedback(self, request: ActionRequest, reason: str) -> str:
         """Explain a rejected answer to the controller in the game language."""
@@ -2092,6 +2150,18 @@ class Game:
                 "上一次回答的 text 是空的；本轮必须给出非空的公开发言内容。",
                 "Your previous answer left text empty; this action requires a "
                 "non-empty statement.",
+            )
+        if reason.startswith("placeholder text"):
+            return self._t(
+                "上一次回答的 text 只是省略号占位；本轮必须写出完整、具体的实际发言。",
+                "Your previous text was only an ellipsis placeholder; provide the "
+                "complete, specific statement this turn.",
+            )
+        if reason.startswith("incomplete text"):
+            return self._t(
+                "上一次回答的 text 疑似在句子中间结束；请缩短内容，并用完整句末标点结束发言。",
+                "Your previous text appears to end mid-sentence. Shorten it and "
+                "finish the statement with complete sentence-ending punctuation.",
             )
         abstain_rule = (
             self._t(
@@ -2191,8 +2261,92 @@ class Game:
             text=sanitize_rendered_text(response.text),
             thought=sanitize_rendered_text(response.thought),
             note=sanitize_rendered_text(response.note),
+            strategy=Game._sanitize_strategy(response.strategy),
             fallback_error=sanitize_rendered_text(response.fallback_error, limit=500),
         )
+
+    @staticmethod
+    def _sanitize_strategy(strategy: StrategyState | None) -> StrategyState | None:
+        """Bound a controller-authored strategy snapshot before persistence."""
+        if strategy is None:
+            return None
+        return StrategyState(
+            day=max(strategy.day, 0),
+            phase=sanitize_rendered_text(strategy.phase, limit=80),
+            beliefs=tuple(
+                PlayerBelief(
+                    player_id=sanitize_rendered_text(belief.player_id, limit=80),
+                    suspicion=min(max(belief.suspicion, 0), 100),
+                    confidence=min(max(belief.confidence, 0), 100),
+                    evidence_sequences=tuple(
+                        sequence
+                        for sequence in belief.evidence_sequences[:8]
+                        if isinstance(sequence, int) and not isinstance(sequence, bool)
+                    ),
+                    rationale=sanitize_rendered_text(belief.rationale, limit=240),
+                )
+                for belief in strategy.beliefs[:16]
+            ),
+            open_questions=tuple(
+                sanitize_rendered_text(question, limit=180)
+                for question in strategy.open_questions[:8]
+            ),
+            plan=sanitize_rendered_text(strategy.plan, limit=300),
+            counter_case=sanitize_rendered_text(strategy.counter_case, limit=300),
+        )
+
+    @staticmethod
+    def _optional_strategy_from_value(value: object) -> StrategyState | None:
+        """Decode an optional journaled strategy update."""
+        if value is None:
+            return None
+        return Game._strategy_from_value(value)
+
+    @staticmethod
+    def _strategy_from_value(value: object) -> StrategyState:
+        """Decode a checkpoint strategy while accepting older missing fields."""
+        if value is None:
+            return StrategyState()
+        if not isinstance(value, dict):
+            msg = "Checkpoint strategy state is malformed"
+            raise TypeError(msg)
+        raw_beliefs = value.get("beliefs", [])
+        if not isinstance(raw_beliefs, (list, tuple)):
+            msg = "Checkpoint strategy beliefs are malformed"
+            raise TypeError(msg)
+        beliefs: list[PlayerBelief] = []
+        for item in raw_beliefs:
+            if not isinstance(item, dict):
+                msg = "Checkpoint strategy belief is malformed"
+                raise TypeError(msg)
+            raw_sequences = item.get("evidence_sequences", [])
+            if not isinstance(raw_sequences, (list, tuple)):
+                msg = "Checkpoint strategy evidence is malformed"
+                raise TypeError(msg)
+            beliefs.append(
+                PlayerBelief(
+                    player_id=str(item.get("player_id", "")),
+                    suspicion=int(item.get("suspicion", 0)),
+                    confidence=int(item.get("confidence", 0)),
+                    evidence_sequences=tuple(
+                        int(sequence) for sequence in raw_sequences
+                    ),
+                    rationale=str(item.get("rationale", "")),
+                ),
+            )
+        raw_questions = value.get("open_questions", [])
+        if not isinstance(raw_questions, (list, tuple)):
+            msg = "Checkpoint strategy questions are malformed"
+            raise TypeError(msg)
+        decoded = StrategyState(
+            day=int(value.get("day", 0)),
+            phase=str(value.get("phase", "")),
+            beliefs=tuple(beliefs),
+            open_questions=tuple(str(question) for question in raw_questions),
+            plan=str(value.get("plan", "")),
+            counter_case=str(value.get("counter_case", "")),
+        )
+        return Game._sanitize_strategy(decoded) or StrategyState()
 
     def _increment_metric(self, name: str) -> None:
         """Update one controller metric safely during parallel vote requests."""
@@ -2367,6 +2521,7 @@ class Game:
                 (item.player_id, item.seat_number, item.name) for item in self.players
             ),
             mechanical_context=self._mechanical_context(),
+            strategy=player.memory.strategy,
         )
 
     def _record_nonterminal_snapshot(self, reason: str) -> None:
@@ -2725,6 +2880,7 @@ class Game:
                 "skills": [asdict(skill) for skill in player.skills],
                 "events": [asdict(event) for event in player.memory.events],
                 "thoughts": [asdict(thought) for thought in player.memory.thoughts],
+                "strategy": asdict(player.memory.strategy),
             }
             self._atomic_private_write(
                 path,

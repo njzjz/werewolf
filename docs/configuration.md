@@ -129,7 +129,7 @@ werewolf setup local.json --no-color
 | `human_strategy_notes`     | 真人行动后是否询问可选的私密策略笔记                          |
 | `confirm_critical_actions` | 投票、用药、开枪、查验等真人选择是否二次确认                  |
 | `parallel_llm_votes`       | 并行请求互不可见的 LLM 公开投票                               |
-| `max_parallel_llm_requests` | 并行投票同时发出的模型请求上限；默认 4，降低 429 限流风险     |
+| `max_parallel_llm_requests` | 并行投票同时发出的模型请求上限；默认 2，降低 429 限流风险     |
 | `enable_tools`             | 是否允许 LLM 调用当前玩家范围内的只读证据工具；默认开启       |
 | `max_tool_rounds`          | 单个动作最多工具往返轮数；默认 2，可配置 1–8                  |
 
@@ -160,6 +160,7 @@ werewolf setup local.json --no-color
 | `model`            | 服务实际接受的模型 ID                                        |
 | `wire_api`         | `responses` 或 `chat`                                        |
 | `reasoning_effort` | 推理强度；Chat 与 Responses 均会传递，具体档位由模型决定      |
+| `max_tokens`       | 单动作输出预算；默认 4000，包含最终 JSON 及 Provider 可能计入的推理输出 |
 | `use_json_mode`    | 服务不支持 JSON mode 时设为 `false`；提示词仍要求 JSON       |
 | `stream`           | 默认开启，使用 SSE 接收增量，降低长推理经过代理时的超时风险  |
 | `force_ipv4`       | IPv6 不可达时强制 IPv4，同时保留 TLS 主机名验证              |
@@ -190,15 +191,20 @@ LLM 的增量内容不会直接打印到公开频道。客户端在本地组装�
 
 第二个例子中的 `max` 不是 OpenAI 通用枚举，只适用于明确声明支持该值的 Provider。配置无法替代模型选择：速度型或小型模型即使开启高推理，策略质量仍可能明显弱于更强的推理模型。
 
-Chat 流式请求会附带 `stream_options.include_usage`，否则该接口不返回 token 统计；个别兼容服务拒绝该字段时会自动改用不带它的请求重发一次。只返回 `reasoning_content` 的推理网关也会被正确解析。模型没有产出任何正文时，错误信息会直接给出原因，例如 `finish_reason=length` 表示 `max_tokens` 太小，需要调高单动作输出预算。
+Chat 流式请求会附带 `stream_options.include_usage`，否则该接口不返回 token 统计；个别兼容服务拒绝该字段时会自动改用不带它的请求重发一次。只返回 `reasoning_content` 的推理网关也会被正确解析。`finish_reason=length` 或 Responses 的 `status=incomplete` 会被视为截断而不是合法发言，控制器重试时会要求模型缩短内容并完整结束 JSON；纯 `...`/`…` 占位发言、以续写标点结束的内容，以及没有完整句末标点的长发言同样会被拒绝。公开文本另有 8000 字符的终端安全上限，正常发言通常不会触及。
+
+有历史的发言和频道交流默认执行“检索证据 → 审核草案 → 最终回答”。并行投票仍会收到完整的玩家私密视图和全部只读工具，但工具调用保持可选，避免每名投票者都固定产生三次 Provider 请求而触发限流。观战提示会显示实际并发上限；限流较严的服务可将 `max_parallel_llm_requests` 进一步设为 `1`。
 
 ## AI 只读证据工具
 
-LLM 默认通过 Chat Completions 或 Responses 的原生 function calling 使用三个工具：
+LLM 默认通过 Chat Completions 或 Responses 的原生 function calling 使用六个工具：
 
 - `get_evidence_ledger`：整理当前玩家可见的角色提及、公开票型、最新发言、私密事件和策略笔记；
 - `search_visible_history`：在当前玩家的完整可见历史中搜索文本，可按公开、单人私密或队伍频道过滤；
 - `get_player_dossier`：按公开玩家 ID 汇总某人的发言、他人提及、票型和当前玩家可见的私密线索。
+- `get_vote_analysis`：把公开投票整理为逐轮票型、目标联盟、个人投票历史和改票次数，不自动推断阵营；
+- `get_claim_matrix`：按玩家和事件序号整理角色提及、自称与否认，所有项目仍明确标记为未确认声明；
+- `review_action_draft`：在最终回答前检查合法选项、必填发言、可见证据序号、反方解释和后续计划。
 
 工具处理器只接收引擎已经裁剪过的 `PlayerView`，不能读取法官身份真相、其他玩家记忆、文件、网络或 Shell。工具结果只存在于该玩家当前动作的内存对话中，不写入公开事件、公开日志，也不会发给其他玩家。公开发言即使由工具检索出来仍是不可信证据，角色自称不会被自动升级成确认事实。
 
@@ -211,9 +217,21 @@ LLM 默认通过 Chat Completions 或 Responses 的原生 function calling 使�
 }
 ```
 
-工具循环有严格轮数上限。有可见历史时，首轮会要求模型至少执行一次只读检索，防止速度型模型无视可选工具；后续轮次仍由模型按需决定，没有历史的开局动作也不会被迫做无意义查询。达到上限后会要求模型直接给出最终 JSON。兼容 Provider 若明确拒绝 `tools` 或 `tool_choice` 字段，客户端会记住该能力缺失，并自动退回普通结构化回答。工具调用需要完整保留 function-call continuation，因此发生工具调用的动作使用非流式完整响应；普通无工具请求仍沿用配置的 SSE 流式路径。终局 token 摘要会同时显示工具调用数和失败数。
+工具循环有严格轮数上限。默认 2 轮在有历史的发言和频道交流中依次用于“证据检索”和“草案审核”：第一轮只能选择证据工具，第二轮只能提交 `review_action_draft`，随后必须输出最终 JSON。没有历史的开局动作不会被迫做无意义查询，并行投票等选择类动作也不会被强制增加请求。若将 `max_tool_rounds` 降为 1，则只保留证据检索；高于 2 的额外轮次可由模型按需使用。兼容 Provider 若明确拒绝 `tools` 或 `tool_choice` 字段，客户端会记住该能力缺失，并自动退回普通结构化回答。工具调用需要完整保留 function-call continuation，因此发生工具调用的动作使用非流式完整响应；普通无工具请求仍沿用配置的 SSE 流式路径。终局 token 摘要会同时显示工具调用数和失败数。
 
 证据工具主要提升长局中的回溯与一致性，不替代强模型和足够的 `reasoning_effort`。它们也会增加请求轮数、输入 token 与延迟；若 Provider 的工具实现较差，可在 TUI 的“终端体验与安全”中关闭，或设置 `"enable_tools": false`。
+
+## 模型思考与长期记忆
+
+Provider 隐藏的内部推理或 `reasoning_content` 不会写入游戏，也不会在下一轮要求模型复述。程序只保存模型主动放入最终 JSON 的简短 `thought`、`note` 和 `memory`：
+
+- `thought` 与 `note` 合并为带昼夜阶段的私密策略笔记；
+- `memory.beliefs` 按玩家 ID 保存 0–100 的怀疑度、置信度、可见证据序号和简短理由；
+- `memory.open_questions` 保存待核验问题；
+- `memory.plan` 保存下一步计划；
+- `memory.counter_case` 保存当前主判断最强的反方解释。
+
+这些内容只进入该玩家下一轮的私密提示词和证据账本，并写入私密 checkpoint 与该玩家自己的终局记忆文件。无效玩家 ID、不可见证据序号和过长文本会被丢弃或裁剪；旧 checkpoint 没有结构化状态时按空状态恢复。它们是玩家自己的策略结论，不是法官事实，也不会发送给其他玩家。
 
 ## Prompt Caching
 

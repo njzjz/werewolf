@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import io
+import json
 import time
 import urllib.error
 from dataclasses import replace
@@ -18,6 +19,7 @@ from werewolf.agents import (
     LLMController,
     OpenAICompatibleClient,
     ProviderHTTPError,
+    ProviderOutputLimitError,
     ProviderProtocolError,
     SafeFallbackController,
     Terminal,
@@ -29,8 +31,10 @@ from werewolf.models import (
     ActionRequest,
     Faction,
     MemoryEvent,
+    PlayerBelief,
     PlayerView,
     Role,
+    StrategyState,
     Thought,
     Visibility,
 )
@@ -96,11 +100,14 @@ def test_llm_receives_only_supplied_personal_view() -> None:
     serialized = str(captured["messages"])
     assert "仅一号可见的查验结果" in serialized
     assert "二号是狼人" not in serialized
-    assert captured["tool_choice"] == "required"
+    assert "tool_choice" not in captured
     assert {tool["function"]["name"] for tool in captured["tools"]} == {
         "get_evidence_ledger",
         "search_visible_history",
         "get_player_dossier",
+        "get_vote_analysis",
+        "get_claim_matrix",
+        "review_action_draft",
     }
     assert response.choice == "p2"
     assert response.thought == "怀疑二号"
@@ -184,6 +191,53 @@ def test_chat_completion_prefers_final_content_over_reasoning_content() -> None:
     content = client.complete([{"role": "user", "content": "行动"}])
 
     assert content == '{"text":"最终答案"}'
+
+
+def test_chat_rejects_partial_content_when_output_limit_was_hit() -> None:
+    """A non-empty but cut-off statement must be retried, not published."""
+
+    def transport(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"choice":null,"text":"理由是他在首日反复强调"}',
+                    },
+                    "finish_reason": "length",
+                },
+            ],
+        }
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+        transport=transport,
+    )
+
+    with pytest.raises(ProviderOutputLimitError, match="output limit"):
+        client.complete([{"role": "user", "content": "行动"}])
+
+
+def test_responses_rejects_incomplete_output_even_when_text_exists() -> None:
+    """Responses incomplete status should override a syntactically valid fragment."""
+
+    def transport(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output_text": '{"text":"被截断的发言"}',
+        }
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(
+            base_url="https://example.invalid/v1",
+            model="test",
+            wire_api="responses",
+        ),
+        transport=transport,
+    )
+
+    with pytest.raises(ProviderOutputLimitError, match="incomplete"):
+        client.complete([{"role": "user", "content": "行动"}])
 
 
 def test_responses_api_payload_and_output_shape() -> None:
@@ -411,6 +465,231 @@ def test_tools_fall_back_when_provider_rejects_the_field() -> None:
 
     assert first == second == '{"text":"普通回答"}'
     assert ["tools" in payload for payload in captured] == [True, False, False]
+
+
+def test_controller_runs_evidence_then_review_and_returns_structured_memory() -> None:
+    """A history-backed speech should retrieve, review, then finalize its state."""
+    captured: list[dict[str, Any]] = []
+    responses: list[dict[str, Any]] = [
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call-votes",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_vote_analysis",
+                                    "arguments": "{}",
+                                },
+                            },
+                        ],
+                    },
+                },
+            ],
+        },
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call-review",
+                                "type": "function",
+                                "function": {
+                                    "name": "review_action_draft",
+                                    "arguments": json.dumps(
+                                        {
+                                            "choice": None,
+                                            "text": "我目前最怀疑三号。",
+                                            "evidence_sequences": [1],
+                                            "counter_case": "三号也可能只是判断失误。",
+                                            "plan": "下一轮复核其票型。",
+                                        },
+                                        ensure_ascii=False,
+                                    ),
+                                },
+                            },
+                        ],
+                    },
+                },
+            ],
+        },
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "choice": None,
+                                "text": "我目前最怀疑三号。",
+                                "thought": "三号当前最可疑。",
+                                "note": "观察下一轮票型。",
+                                "memory": {
+                                    "beliefs": [
+                                        {
+                                            "player_id": "p3",
+                                            "suspicion": 78,
+                                            "confidence": 66,
+                                            "evidence_sequences": [1, 999],
+                                            "rationale": "一号事件中的公开发言。",
+                                        },
+                                    ],
+                                    "open_questions": ["三号会不会改票？"],
+                                    "plan": "下一轮复核三号。",
+                                    "counter_case": "三号可能只是表达失误。",
+                                },
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                },
+            ],
+        },
+    ]
+
+    def transport(payload: dict[str, Any]) -> dict[str, Any]:
+        captured.append(copy.deepcopy(payload))
+        return responses.pop(0)
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+        transport=transport,
+    )
+    view = replace(
+        seat_view(),
+        phase="discussion",
+        events=(
+            MemoryEvent(
+                sequence=1,
+                day=1,
+                phase="discussion",
+                text="3号 智能体3：我认为一号可疑。",
+                visibility=Visibility.PUBLIC,
+                sender="3号 智能体3",
+            ),
+        ),
+    )
+
+    result = LLMController(client).act(
+        view,
+        ActionRequest(
+            ActionKind.SPEAK,
+            "请发言",
+            requires_text=True,
+        ),
+    )
+
+    assert {tool["function"]["name"] for tool in captured[0]["tools"]} == {
+        "get_evidence_ledger",
+        "search_visible_history",
+        "get_player_dossier",
+        "get_vote_analysis",
+        "get_claim_matrix",
+    }
+    assert [tool["function"]["name"] for tool in captured[1]["tools"]] == [
+        "review_action_draft",
+    ]
+    assert "tools" not in captured[2]
+    assert result.text == "我目前最怀疑三号。"
+    assert result.strategy is not None
+    assert result.strategy.beliefs[0].suspicion == 78
+    assert result.strategy.beliefs[0].evidence_sequences == (1,)
+    assert result.strategy.open_questions == ("三号会不会改票？",)
+
+
+def test_choice_only_action_offers_tools_without_forcing_three_requests() -> None:
+    """Parallel-friendly choices keep tools optional to avoid request bursts."""
+    captured: list[dict[str, Any]] = []
+
+    def transport(payload: dict[str, Any]) -> dict[str, Any]:
+        captured.append(copy.deepcopy(payload))
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"choice":"p3","text":""}',
+                    },
+                },
+            ],
+        }
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+        transport=transport,
+    )
+    view = replace(
+        seat_view(),
+        phase="vote",
+        events=(
+            MemoryEvent(
+                sequence=1,
+                day=1,
+                phase="discussion",
+                text="3号 智能体3：我认为一号可疑。",
+                visibility=Visibility.PUBLIC,
+                sender="3号 智能体3",
+            ),
+        ),
+    )
+
+    result = LLMController(client).act(
+        view,
+        ActionRequest(
+            ActionKind.VOTE,
+            "请投票",
+            (ActionOption("p3", "3号 智能体3"),),
+        ),
+    )
+
+    assert result.choice == "p3"
+    assert len(captured) == 1
+    assert {tool["function"]["name"] for tool in captured[0]["tools"]} == {
+        "get_evidence_ledger",
+        "search_visible_history",
+        "get_player_dossier",
+        "get_vote_analysis",
+        "get_claim_matrix",
+        "review_action_draft",
+    }
+    assert "tool_choice" not in captured[0]
+
+
+def test_structured_strategy_is_private_prompt_context() -> None:
+    """The latest belief state should be readable next turn but never public."""
+    strategy = StrategyState(
+        day=2,
+        phase="vote",
+        beliefs=(
+            PlayerBelief(
+                player_id="p3",
+                suspicion=75,
+                confidence=60,
+                evidence_sequences=(8,),
+                rationale="八号事件中改票。",
+            ),
+        ),
+        open_questions=("三号身份声明是否一致？",),
+        plan="优先核对三号。",
+        counter_case="三号可能是被迫改票。",
+    )
+
+    controller = LLMController(
+        OpenAICompatibleClient(
+            LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+        ),
+    )
+    messages = controller._messages(  # noqa: SLF001
+        replace(seat_view(), strategy=strategy),
+        ActionRequest(ActionKind.SPEAK, "请发言", requires_text=True),
+    )
+
+    assert "结构化策略状态" in messages[-2]["content"]
+    assert '"suspicion": 75' in messages[-2]["content"]
+    assert "优先核对三号" not in str(messages[:3])
 
 
 def test_responses_prompt_cache_uses_stable_private_key_and_tracks_usage() -> None:

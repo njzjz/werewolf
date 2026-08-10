@@ -47,7 +47,7 @@ class LLMProviderConfig:
     api_key_env: str | None = None
     temperature: float = 0.7
     timeout: float = 120.0
-    max_tokens: int = 2000
+    max_tokens: int = 4000
     use_json_mode: bool = True
     wire_api: str = "chat"
     reasoning_effort: str | None = None
@@ -121,7 +121,7 @@ class GameConfig:
     human_strategy_notes: bool = False
     confirm_critical_actions: bool = True
     parallel_llm_votes: bool = True
-    max_parallel_llm_requests: int = 4
+    max_parallel_llm_requests: int = 2
     enable_tools: bool = True
     max_tool_rounds: int = 2
 
@@ -205,7 +205,7 @@ def _provider_from_dict(raw: object, *, path: str) -> LLMProviderConfig:
         ),
         temperature=_number(raw.get("temperature", 0.7), f"{path}.temperature"),
         timeout=_number(raw.get("timeout", 120.0), f"{path}.timeout"),
-        max_tokens=_integer(raw.get("max_tokens", 2000), f"{path}.max_tokens"),
+        max_tokens=_integer(raw.get("max_tokens", 4000), f"{path}.max_tokens"),
         use_json_mode=_boolean(
             raw.get("use_json_mode", True),
             f"{path}.use_json_mode",
@@ -468,7 +468,7 @@ def load_config(path: str | Path) -> GameConfig:
             "parallel_llm_votes",
         ),
         max_parallel_llm_requests=_integer(
-            raw.get("max_parallel_llm_requests", 4),
+            raw.get("max_parallel_llm_requests", 2),
             "max_parallel_llm_requests",
         ),
         enable_tools=_boolean(raw.get("enable_tools", True), "enable_tools"),
@@ -804,7 +804,7 @@ def example_config() -> dict[str, Any]:
         "human_strategy_notes": False,
         "confirm_critical_actions": True,
         "parallel_llm_votes": True,
-        "max_parallel_llm_requests": 4,
+        "max_parallel_llm_requests": 2,
         "enable_tools": True,
         "max_tool_rounds": 2,
         "providers": {
@@ -815,7 +815,7 @@ def example_config() -> dict[str, Any]:
                 "model": "your-model-id",
                 "temperature": 0.7,
                 "timeout": 120,
-                "max_tokens": 2000,
+                "max_tokens": 4000,
                 "use_json_mode": True,
                 "wire_api": "responses",
                 "reasoning_effort": "high",
