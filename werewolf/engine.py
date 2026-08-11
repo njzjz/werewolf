@@ -14,7 +14,7 @@ import unicodedata
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import suppress
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -110,6 +110,7 @@ class ControllerMetrics:
     failures: int = 0
     retries: int = 0
     fallbacks: int = 0
+    failure_breakdown: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -649,12 +650,23 @@ class Game:
         if not isinstance(metrics, dict):
             msg = "Checkpoint controller metrics are malformed"
             raise TypeError(msg)
+        failure_breakdown = metrics.get("failure_breakdown", {})
+        if not isinstance(failure_breakdown, dict) or not all(
+            isinstance(key, str)
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+            for key, value in failure_breakdown.items()
+        ):
+            msg = "Checkpoint controller failure breakdown is malformed"
+            raise TypeError(msg)
         self._controller_metrics = ControllerMetrics(
             actions=int(metrics.get("actions", 0)),
             attempts=int(metrics.get("attempts", 0)),
             failures=int(metrics.get("failures", 0)),
             retries=int(metrics.get("retries", 0)),
             fallbacks=int(metrics.get("fallbacks", 0)),
+            failure_breakdown=dict(failure_breakdown),
         )
         fallback_records = raw.get("fallback_records", [])
         if not isinstance(fallback_records, list) or not all(
@@ -2346,7 +2358,7 @@ class Game:
                 # request, optionally after their transport-level backoff.
                 feedback = self._controller_exception_feedback(exc)
                 if is_llm:
-                    self._increment_metric("failures")
+                    self._record_controller_failure(request, last_error)
                 if attempt < self.config.controller_retries:
                     if is_llm:
                         self._increment_metric("retries")
@@ -2382,7 +2394,7 @@ class Game:
             last_error = self._short_error(reason)
             feedback = self._retry_feedback(request, reason)
             if is_llm:
-                self._increment_metric("failures")
+                self._record_controller_failure(request, last_error)
             if attempt < self.config.controller_retries:
                 if is_llm:
                     self._increment_metric("retries")
@@ -2760,6 +2772,23 @@ class Game:
         with self._state_lock:
             value = getattr(self._controller_metrics, name)
             setattr(self._controller_metrics, name, value + 1)
+
+    def _record_controller_failure(
+        self,
+        request: ActionRequest,
+        detail: str,
+    ) -> None:
+        """Count one failed attempt and retain a privacy-safe category.
+
+        The aggregate key contains only the public action kind and the sanitized
+        failure summary. It is safe to checkpoint and print after settlement,
+        including when the failed action itself was private.
+        """
+        key = f"{request.kind.value}/{self._safe_error_summary(detail)}"
+        with self._state_lock:
+            self._controller_metrics.failures += 1
+            breakdown = self._controller_metrics.failure_breakdown
+            breakdown[key] = breakdown.get(key, 0) + 1
 
     def _announce_controller_fallback(
         self,
@@ -3312,15 +3341,21 @@ class Game:
         if metrics.actions == 0:
             return ""
         clean = metrics.fallbacks == 0
+        breakdown = "，".join(
+            f"{key}={count}" for key, count in sorted(metrics.failure_breakdown.items())
+        )
+        breakdown_zh = f" 失败明细：{breakdown}。" if breakdown else ""
+        breakdown_en = f" Failure breakdown: {breakdown}." if breakdown else ""
         return self._t(
             "LLM 控制器："
             f"动作 {metrics.actions}，请求尝试 {metrics.attempts}，失败 {metrics.failures}，"
             f"重试 {metrics.retries}，安全后备 {metrics.fallbacks}。"
-            f"本局{'满足' if clean else '不满足'}完整 LLM 对局标准。",
+            f"本局{'满足' if clean else '不满足'}完整 LLM 对局标准。{breakdown_zh}",
             "LLM controllers: "
             f"{metrics.actions} actions, {metrics.attempts} attempts, {metrics.failures} failures, "
             f"{metrics.retries} retries, {metrics.fallbacks} safe fallbacks. "
-            f"This match {'meets' if clean else 'does not meet'} the complete-LLM standard.",
+            f"This match {'meets' if clean else 'does not meet'} the complete-LLM standard."
+            f"{breakdown_en}",
         )
 
     def _llm_token_usage_text(self) -> str:
