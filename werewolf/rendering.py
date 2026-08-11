@@ -45,8 +45,14 @@ def sanitize_rendered_text(
 
 
 def frame_rendered_lines(label: object, text: object) -> str:
-    """Prefix every logical line so multiline text cannot forge a sender."""
+    """Render one labeled block while marking every authenticated continuation."""
     safe_label = sanitize_rendered_text(label, limit=160).replace("\n", " ").strip()
     safe_label = safe_label or "output"
     safe_text = sanitize_rendered_text(text)
-    return "\n".join(f"[{safe_label}] {line}" for line in safe_text.split("\n"))
+    first_line, *continuation_lines = safe_text.split("\n")
+    rendered_lines = [f"[{safe_label}] {first_line}"]
+    # Keep continuation lines inside a visible gutter. This avoids repeating the
+    # speaker label while ensuring player-controlled text cannot forge a new
+    # top-level judge, spectator, or player message after a newline.
+    rendered_lines.extend(f"  │ {line}" for line in continuation_lines)
+    return "\n".join(rendered_lines)
