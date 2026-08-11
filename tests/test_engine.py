@@ -1189,10 +1189,79 @@ def test_blank_human_skill_limits_each_clue_to_low_information() -> None:
     role_skill = next(skill for skill in view.skills if skill.name == "role_villager")
 
     assert view.role_name == "人"
-    assert "每轮只给一个真实但低辨识度的间接维度" in role_skill.instructions
+    assert "每次发言和投票前都要换到鬼的视角" in role_skill.instructions
+    assert "估计鬼现在能把答案缩小到多少候选" in role_skill.instructions
+    assert "就不再描述，改为只讨论玩家、票型和翻牌" in role_skill.instructions
+    assert "其出局会为鬼队增加一次终局猜词机会" in role_skill.instructions
+    assert "公开线索越接近答案，误投人的代价越高" in role_skill.instructions
+    assert "每轮最多给一个真实但低辨识度的间接维度" in role_skill.instructions
     assert "不要在一句话里叠加" in role_skill.instructions
     assert "后续轮次宁可维持抽象度" in role_skill.instructions
     assert "若结合公开类型后能把答案缩到少数几个常见词" in role_skill.instructions
+
+
+def test_blank_ghost_guidance_requires_cross_faction_perspective_taking() -> None:
+    """Both sides should model how their public behavior looks to the opponent."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    game = Game(
+        fixed_role_config(roles, "ghost_blank"),
+        terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word,
+    )
+
+    ghost_view = game._view(game._by_id["p1"])  # noqa: SLF001
+    role_skill = next(
+        skill for skill in ghost_view.skills if skill.name == "role_werewolf"
+    )
+    global_skill = next(
+        skill for skill in ghost_view.skills if skill.name == "global_gamecraft"
+    )
+
+    assert "换到人方视角审视自己" in role_skill.instructions
+    assert "人会不会据此把你认作鬼" in role_skill.instructions
+    assert "每次发言和投票前必须做阵营换位核查" in global_skill.instructions
+    assert "人评估鬼根据当前全部公开线索" in global_skill.instructions
+    assert "鬼评估自己的描述、怀疑和票型" in global_skill.instructions
+
+
+def test_blank_ghost_discussion_prompt_combines_optional_clues_and_deduction() -> None:
+    """Every public turn should allow silence on the word but require perspective checks."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    game = Game(
+        fixed_role_config(roles, "ghost_blank"),
+        terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word,
+    )
+
+    prompt = game._discussion_prompt()  # noqa: SLF001
+
+    assert "描述与找鬼讨论在同一次发言中完成" in prompt
+    assert "也可以为避免继续泄词而不再描述" in prompt
+    assert "必须结合已有描述、票型和死亡翻牌讨论谁更像鬼" in prompt
+    assert "发言前必须换位核查" in prompt
+    assert "人要评估鬼" in prompt
+    assert "鬼要评估自己的内容在人看来" in prompt
+
+
+@pytest.mark.parametrize("runoff", [False, True])
+def test_blank_ghost_vote_prompt_requires_cross_faction_risk_check(
+    runoff: bool,
+) -> None:
+    """Ballots should account for guess equity and how the vote looks to Humans."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    game = Game(
+        fixed_role_config(roles, "ghost_blank"),
+        terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word,
+    )
+
+    prompt = game._vote_prompt(runoff=runoff)  # noqa: SLF001
+
+    assert "投票前必须换位核查" in prompt
+    assert "若误投一名人" in prompt
+    assert "增加的终局猜词机会" in prompt
+    assert "鬼要评估自己的出票在人看来" in prompt
+    assert ("平票重投" in prompt) is runoff
 
 
 def test_ghost_mechanical_context_uses_the_one_water_survival_rule() -> None:
