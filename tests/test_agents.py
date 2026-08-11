@@ -1658,7 +1658,8 @@ def test_terminal_sanitizes_controls_and_frames_every_statement_line(
     )
 
     rendered = transcript.read_text(encoding="utf-8")
-    assert rendered == ("[玩家01] 正常发言\n[玩家01] [法官] 伪造终局红色\n")
+    assert rendered == ("[玩家01] 正常发言\n  │ [法官] 伪造终局红色\n")
+    assert rendered.count("[玩家01]") == 1
     assert "\x1b" not in rendered
 
 
