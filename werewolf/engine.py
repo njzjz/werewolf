@@ -29,6 +29,7 @@ from .agents import (
     PrivateResultReceiver,
     ProviderHTTPError,
     ProviderOutputLimitError,
+    ProviderProtocolError,
     SafeFallbackController,
     Terminal,
 )
@@ -2340,20 +2341,10 @@ class Game:
                 raise
             except Exception as exc:
                 last_error = self._short_error(f"{type(exc).__name__}: {exc}")
-                # Transport failures give the model nothing to correct, but an
-                # exhausted output budget can often be repaired by answering
-                # more concisely on the configured controller retry.
-                feedback = (
-                    self._t(
-                        "上一次回答被输出 token 上限截断；请显著缩短发言和私密笔记，"
-                        "确保最终 JSON 与每个句子完整结束。",
-                        "Your previous answer hit the output-token limit. Shorten "
-                        "the statement and private notes substantially, and finish "
-                        "every sentence and the final JSON.",
-                    )
-                    if isinstance(exc, ProviderOutputLimitError)
-                    else ""
-                )
+                # Only model-correctable output failures receive prompt
+                # feedback. Network and provider failures retry the unchanged
+                # request, optionally after their transport-level backoff.
+                feedback = self._controller_exception_feedback(exc)
                 if is_llm:
                     self._increment_metric("failures")
                 if attempt < self.config.controller_retries:
@@ -2367,6 +2358,7 @@ class Game:
                             isinstance(exc, ProviderHTTPError)
                             and exc.status_code == 429
                         ),
+                        detail=last_error,
                     )
                     if retry_delay:
                         self._extend_provider_retry_deadline(retry_delay)
@@ -2377,6 +2369,7 @@ class Game:
                         player,
                         request,
                         last_error,
+                        attempts=attempt + 1,
                     )
                     raise RuntimeError(msg) from exc
                 return self._safe_fallback(player, request, last_error, attempt + 1)
@@ -2393,10 +2386,18 @@ class Game:
             if attempt < self.config.controller_retries:
                 if is_llm:
                     self._increment_metric("retries")
-                self._announce_controller_retry(attempt + 1)
+                self._announce_controller_retry(
+                    attempt + 1,
+                    detail=last_error,
+                )
                 continue
             if self.config.strict_controllers:
-                msg = self._strict_controller_error(player, request, last_error)
+                msg = self._strict_controller_error(
+                    player,
+                    request,
+                    last_error,
+                    attempts=attempt + 1,
+                )
                 raise RuntimeError(msg)
             return self._safe_fallback(player, request, last_error, attempt + 1)
         msg = "Controller retry loop ended without a response"
@@ -2513,6 +2514,51 @@ class Game:
             f"name. {abstain_rule}",
         )
 
+    def _controller_exception_feedback(self, exc: Exception) -> str:
+        """Return corrective prompt text for model-authored output failures.
+
+        Provider outages and malformed transport envelopes are not something a
+        model can repair, so they deliberately receive no added prompt. The
+        returned feedback never embeds the rejected raw response, which may
+        contain private strategy or untrusted terminal text.
+        """
+        if isinstance(exc, ProviderOutputLimitError):
+            return self._t(
+                "上一次回答被输出 token 上限截断；请显著缩短发言和私密笔记，"
+                "确保最终 JSON 与每个句子完整结束。",
+                "Your previous answer hit the output-token limit. Shorten the "
+                "statement and private notes substantially, and finish every "
+                "sentence and the final JSON.",
+            )
+        detail = str(exc).lower()
+        invalid_json = isinstance(exc, RuntimeError) and detail.startswith(
+            "llm did not return json",
+        )
+        non_object_json = isinstance(exc, TypeError) and detail.startswith(
+            "llm response must be a json object",
+        )
+        if invalid_json or non_object_json:
+            return self._t(
+                "上一次回答不是可用的 JSON 对象；请只输出一个完整 JSON 对象，"
+                "严格包含当前动作所需的 choice 或 text 字段，不要添加 Markdown、"
+                "解释文字或第二个 JSON 对象。",
+                "Your previous answer was not a usable JSON object. Output exactly "
+                "one complete JSON object containing the choice or text field "
+                "required by this action, with no Markdown, commentary, or second "
+                "JSON object.",
+            )
+        if isinstance(exc, ProviderProtocolError) and detail.startswith(
+            ("llm returned an empty answer", "llm tool loop ended without"),
+        ):
+            return self._t(
+                "上一次回答没有生成最终 JSON；请完成工具调用后输出一个包含当前"
+                "动作所需字段的完整 JSON 对象。",
+                "Your previous answer did not produce final JSON. After any tool "
+                "calls, output one complete JSON object containing the fields "
+                "required by this action.",
+            )
+        return ""
+
     def _record_private_fallback_note(self, player: PlayerState, text: str) -> None:
         """Tell one player why the judge replaced their action, and nobody else."""
         with self._state_lock:
@@ -2528,8 +2574,10 @@ class Game:
         player: PlayerState,
         request: ActionRequest,
         detail: str,
+        *,
+        attempts: int,
     ) -> str:
-        """Keep private actors and abilities out of resumable terminal errors."""
+        """Report retry exhaustion without exposing private actors or abilities."""
         public_kinds = {
             ActionKind.SPEAK,
             ActionKind.LAST_WORDS,
@@ -2537,20 +2585,41 @@ class Game:
             ActionKind.GHOST_GUESS,
         }
         safe_detail = self._safe_error_summary(detail)
+        attempt_label = "attempt" if attempts == 1 else "attempts"
         if request.kind in public_kinds:
             return (
                 f"Controller failed for {self._player_label(player)} during "
-                f"{request.kind.value}: {safe_detail}"
+                f"{request.kind.value} after {attempts} {attempt_label}: {safe_detail}"
             )
-        return f"Controller failed during a private action ({safe_detail}); private details were not printed."
+        return (
+            f"Controller failed during a private action after {attempts} "
+            f"{attempt_label} ({safe_detail}); private details were not printed."
+        )
 
     @staticmethod
     def _safe_error_summary(detail: str) -> str:
-        """Keep only diagnostics explicitly safe for shared output and exports."""
-        if detail.lower().startswith(
-            ("illegal choice", "missing choice", "empty text")
-        ):
-            return "invalid response"
+        """Keep actionable diagnostics safe for shared output and exports.
+
+        Public controller failures need enough detail to distinguish malformed
+        JSON, a missing field, and an illegal selection. Provider-authored
+        values are deliberately omitted because a model can place private
+        reasoning in any field, including ``choice``.
+        """
+        lowered = detail.lower()
+        safe_validation_errors = {
+            "illegal choice": "illegal choice",
+            "missing choice": "missing required choice",
+            "empty text": "missing required text",
+            "placeholder text": "placeholder text",
+            "incomplete text": "incomplete text",
+        }
+        for prefix, summary in safe_validation_errors.items():
+            if lowered.startswith(prefix):
+                return summary
+        if lowered.startswith("runtimeerror: llm did not return json"):
+            return "LLM did not return valid JSON"
+        if lowered.startswith("typeerror: llm response must be a json object"):
+            return "LLM response was not a JSON object"
         category, separator, message = detail.partition(":")
         if category in {"ProviderHTTPError", "ProviderProtocolError"} and separator:
             return message.strip()
@@ -2751,8 +2820,9 @@ class Game:
         *,
         delay_seconds: float = 0.0,
         rate_limited: bool = False,
+        detail: str = "",
     ) -> None:
-        """Expose a technical retry without identifying a private actor."""
+        """Expose a sanitized retry reason without identifying a private actor."""
         if not self.config.spectator_progress:
             return
         if rate_limited and delay_seconds:
@@ -2763,11 +2833,14 @@ class Game:
                 f"{self.config.controller_retries} in {delay_seconds:g} seconds...",
             )
         else:
+            safe_detail = self._safe_error_summary(detail) if detail else ""
+            reason_zh = f"（原因：{safe_detail}）" if safe_detail else ""
+            reason_en = f" (reason: {safe_detail})" if safe_detail else ""
             text = self._t(
-                f"LLM 调用未成功，正在进行第 {retry_number}/"
-                f"{self.config.controller_retries} 次重试……",
-                f"The LLM call failed; retry {retry_number}/"
-                f"{self.config.controller_retries} is starting...",
+                f"LLM 正在进行第 {retry_number}/{self.config.controller_retries} "
+                f"次重试{reason_zh}……",
+                f"LLM retry {retry_number}/{self.config.controller_retries} is "
+                f"starting{reason_en}...",
             )
         self.terminal.transient_progress(text)
 

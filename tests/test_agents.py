@@ -1486,6 +1486,36 @@ def test_terminal_transient_progress_is_muted_and_erased(monkeypatch) -> None:
     assert "\033[2m[观战] 等待 Provider\033[0m" in output.getvalue()
 
 
+def test_terminal_transient_progress_never_wraps_on_a_narrow_tty(
+    monkeypatch,
+) -> None:
+    """A wrapped transient line cannot be erased reliably with one line clear."""
+
+    class TTYBuffer(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    output = TTYBuffer()
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(agents_module.sys, "stdout", output)
+    monkeypatch.setattr(
+        agents_module.shutil,
+        "get_terminal_size",
+        lambda _fallback: agents_module.os.terminal_size((20, 24)),
+    )
+    terminal = Terminal(clear_screen=False)
+
+    terminal.transient_progress("并行投票处理中：0/10 完成，已用 1 秒")
+    terminal.clear_transient_progress()
+
+    rendered = output.getvalue()
+    status = rendered.split("\033[38;5;244m", 1)[1].split("\033[0m", 1)[0]
+    assert agents_module._terminal_cell_width(status) <= 19  # noqa: SLF001
+    assert status.startswith("[观战] ")
+    assert status.endswith("…")
+    assert rendered.endswith("\r\033[2K")
+
+
 def test_terminal_sanitizes_controls_and_frames_every_statement_line(
     tmp_path,
 ) -> None:

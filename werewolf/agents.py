@@ -9,10 +9,12 @@ import math
 import os
 import random
 import re
+import shutil
 import socket
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -94,6 +96,44 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_SSE_EVENT_BYTES = 256 * 1024
 MAX_ASSEMBLED_TEXT_CHARS = 1_000_000
 PRIVATE_CONTEXT_MARKER = "【玩家私密上下文｜法官权威数据】"
+TRANSIENT_PROGRESS_PREFIX = "[观战] "
+
+
+def _terminal_cell_width(text: str) -> int:
+    """Return a conservative terminal-column width for sanitized text.
+
+    The transient status contains Chinese text, so ``len`` cannot predict
+    wrapping: full-width characters normally consume two terminal columns.
+    Formatting and combining code points do not advance the cursor.
+    """
+    width = 0
+    for character in text:
+        category = unicodedata.category(character)
+        if unicodedata.combining(character) or category in {"Cf", "Me", "Mn"}:
+            continue
+        width += 2 if unicodedata.east_asian_width(character) in {"F", "W"} else 1
+    return width
+
+
+def _fit_terminal_line(text: str, max_cells: int) -> str:
+    """Truncate text to one physical terminal row, including an ellipsis."""
+    if max_cells <= 0:
+        return ""
+    if _terminal_cell_width(text) <= max_cells:
+        return text
+    ellipsis = "…"
+    ellipsis_width = _terminal_cell_width(ellipsis)
+    if ellipsis_width > max_cells:
+        return ""
+    fitted: list[str] = []
+    used = 0
+    for character in text:
+        character_width = _terminal_cell_width(character)
+        if used + character_width + ellipsis_width > max_cells:
+            break
+        fitted.append(character)
+        used += character_width
+    return "".join(fitted) + ellipsis
 
 
 def _safe_diagnostic_token(value: object, *, limit: int = 128) -> str | None:
@@ -304,10 +344,17 @@ class Terminal:
             return
         with self._output_lock:
             safe_text = sanitize_rendered_text(text).replace("\n", " ")
+            # Leave one spare column to avoid terminals entering pending-wrap
+            # state when the status lands exactly on the rightmost cell.
+            columns = shutil.get_terminal_size((80, 24)).columns
+            status = _fit_terminal_line(
+                f"{TRANSIENT_PROGRESS_PREFIX}{safe_text}",
+                max(columns - 1, 1),
+            )
             muted = "\033[38;5;244m" if "NO_COLOR" not in os.environ else "\033[2m"
             reset = "\033[0m"
             print(
-                f"\r\033[2K{muted}[观战] {safe_text}{reset}",
+                f"\r\033[2K{muted}{status}{reset}",
                 end="",
                 flush=True,
             )
