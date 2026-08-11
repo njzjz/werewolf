@@ -1774,19 +1774,11 @@ class Game:
             )
         self._announce(announcement)
         for player in speakers:
-            prompt = (
-                self._t(
-                    "请描述你的私密词牌，或在无词时根据已有描述进行伪装；禁止直接说出你猜到或拿到的词。",
-                    "Describe your private word, or blend in from existing clues if you have no word. Never say the word you received or inferred directly.",
-                )
-                if self._is_ghost_mode()
-                else self._t("请发表本轮公开发言。", "Give your public statement.")
-            )
             response = self._act(
                 player,
                 ActionRequest(
                     ActionKind.SPEAK,
-                    prompt,
+                    self._discussion_prompt(),
                     requires_text=True,
                 ),
             )
@@ -1913,14 +1905,7 @@ class Game:
                     voter,
                     ActionRequest(
                         ActionKind.VOTE,
-                        self._t(
-                            "平票重投：请选择放逐对象。"
-                            if runoff
-                            else "请选择今天要放逐的玩家。",
-                            "Runoff: choose whom to eliminate."
-                            if runoff
-                            else "Choose whom to eliminate today.",
-                        ),
+                        self._vote_prompt(runoff=runoff),
                         self._options(candidates),
                         allow_abstain=True,
                     ),
@@ -1940,6 +1925,51 @@ class Game:
             self._t(f"公开投票结果：{vote_text}。", f"Public votes: {vote_text}."),
         )
         return votes
+
+    def _discussion_prompt(self) -> str:
+        """Describe the active mode's combined clue-and-deduction turn."""
+        if self.config.role_preset == "ghost_blank":
+            return self._t(
+                "请发表本轮公开发言。描述与找鬼讨论在同一次发言中完成：你可以补充一条低辨识度的"
+                "间接线索，也可以为避免继续泄词而不再描述；必须结合已有描述、票型和死亡翻牌讨论谁"
+                "更像鬼，并尽量说明首选、备选和出票方向。发言前必须换位核查：人要评估鬼根据全部"
+                "公开线索是否已能把词缩到少数候选，鬼要评估自己的内容在人看来是否只是跟随或伪装。"
+                "禁止直接说出你拿到或猜到的词。",
+                "Give your public statement. Clues and Ghost-hunting discussion share this turn. You may add one low-information indirect clue, or stop adding clues to avoid revealing the word. Use prior clues, votes, and revealed roles to discuss likely Ghosts and, when possible, name a primary target, backup, and voting plan. Before speaking, adopt the other side's perspective: Humans must assess whether the public evidence already lets Ghosts narrow the word to a few candidates, while Ghosts must assess whether Humans would see their statement as imitation or disguise. Never say the word you received or inferred.",
+            )
+        if self.config.role_preset == "ghost_similar":
+            return self._t(
+                "请在同一次公开发言中描述词牌并讨论找鬼；结合已有描述、票型和死亡翻牌比较词义偏差，"
+                "并尽量说明首选、备选和出票方向。禁止直接说出你拿到的词。",
+                "In one public statement, describe your word and discuss likely Ghosts. Compare semantic differences using prior clues, votes, and revealed roles, and when possible name a primary target, backup, and voting plan. Never say the word you received.",
+            )
+        return self._t("请发表本轮公开发言。", "Give your public statement.")
+
+    def _vote_prompt(self, *, runoff: bool) -> str:
+        """Require mode-specific risk checks before a public ballot."""
+        if self.config.role_preset == "ghost_blank":
+            action = (
+                self._t(
+                    "平票重投：请选择放逐对象。", "Runoff: choose whom to eliminate."
+                )
+                if runoff
+                else self._t(
+                    "请选择今天要放逐的玩家。",
+                    "Choose whom to eliminate today.",
+                )
+            )
+            return self._t(
+                "投票前必须换位核查：人要评估若误投一名人，增加的终局猜词机会结合当前公开线索会"
+                "给鬼多大收益；鬼要评估自己的出票在人看来是否暴露伪装或队友。" + action,
+                "Before voting, adopt the other side's perspective. Humans must assess how much an extra finale guess would help the Ghosts if a Human is wrongly eliminated, given the current public clues. Ghosts must assess whether their ballot would expose their disguise or teammate to Humans. "
+                + action,
+            )
+        return self._t(
+            "平票重投：请选择放逐对象。" if runoff else "请选择今天要放逐的玩家。",
+            "Runoff: choose whom to eliminate."
+            if runoff
+            else "Choose whom to eliminate today.",
+        )
 
     @staticmethod
     def _vote_leaders(votes: dict[str, str | None]) -> list[str]:
