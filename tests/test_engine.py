@@ -856,7 +856,11 @@ def test_blank_ghost_word_is_generated_by_the_configured_llm() -> None:
     response_format = captured["response_format"]
     assert isinstance(response_format, dict)
     assert response_format["type"] == "json_schema"
-    assert "随机生成" in captured["messages"][1]["content"]
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    generation_message = messages[1]
+    assert isinstance(generation_message, dict)
+    assert "随机生成" in generation_message["content"]
 
 
 def test_blank_ghost_requires_a_word_generation_provider() -> None:
