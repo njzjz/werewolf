@@ -212,8 +212,10 @@ def build_parser() -> argparse.ArgumentParser:
     demo_parser.add_argument(
         "--preset",
         default="classic",
-        choices=tuple(ROLE_PRESET_SIZES),
-        help="游戏模式：classic、killer、ghost_similar、ghost_blank 或电影系列预设",
+        choices=tuple(
+            preset for preset in ROLE_PRESET_SIZES if preset != "ghost_blank"
+        ),
+        help="游戏模式：classic、killer、ghost_similar 或电影系列预设",
     )
     return parser
 

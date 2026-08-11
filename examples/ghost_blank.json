@@ -3,6 +3,14 @@
   "role_preset": "ghost_blank",
   "seed": null,
   "clear_screen": true,
+  "providers": {
+    "default": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "model": "your-model-id",
+      "wire_api": "responses"
+    }
+  },
   "memory_directory": "game_memories/ghost_blank",
   "public_transcript_path": "game_runs/ghost_blank.public.log",
   "checkpoint_path": "game_runs/ghost_blank.private.checkpoint.json",
