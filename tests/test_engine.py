@@ -1169,7 +1169,10 @@ def test_strict_controllers_never_fall_back_to_local_bot() -> None:
         controllers={"p1": illegal},
         terminal=SilentTerminal(),
     )
-    with pytest.raises(RuntimeError, match="invalid response"):
+    with pytest.raises(
+        RuntimeError,
+        match="illegal choice",
+    ) as captured:
         illegal_game._act(  # noqa: SLF001
             illegal_game._by_id["p1"],  # noqa: SLF001
             ActionRequest(
@@ -1178,6 +1181,8 @@ def test_strict_controllers_never_fall_back_to_local_bot() -> None:
                 (ActionOption("p2", "玩家2"),),
             ),
         )
+    assert "not-a-player" not in str(captured.value)
+    assert "after 1 attempt" in str(captured.value)
 
 
 def test_strict_private_failure_does_not_reveal_actor_or_ability() -> None:
@@ -1427,10 +1432,15 @@ def test_omitted_llm_choice_is_retried_before_explicit_abstention() -> None:
     controller = RecordingController(
         [AgentResponse(choice_provided=False), AgentResponse(choice=None)],
     )
+    terminal = CapturingTerminal()
     game = Game(
-        llm_seat_config(controller_retries=1, strict_controllers=True),
+        llm_seat_config(
+            controller_retries=1,
+            spectator_progress=True,
+            strict_controllers=True,
+        ),
         controllers={"p1": controller},
-        terminal=SilentTerminal(),
+        terminal=terminal,
     )
     game.phase = "vote"
 
@@ -1448,6 +1458,9 @@ def test_omitted_llm_choice_is_retried_before_explicit_abstention() -> None:
     assert response.choice_provided is True
     assert "缺少 choice 字段" in controller.requests[1].retry_feedback
     assert "choice: null" in controller.requests[1].retry_feedback
+    assert any(
+        "missing required choice" in item for item in terminal.transient_progress_events
+    )
     assert game._controller_metrics.retries == 1  # noqa: SLF001
 
 
@@ -1579,8 +1592,42 @@ def test_output_limit_retry_tells_model_to_shorten_its_answer() -> None:
     assert "token 上限截断" in controller.requests[1].retry_feedback
 
 
-def test_strict_mode_reports_a_silent_model_as_an_invalid_response() -> None:
-    """An exhausted retry budget should expose a safe validation category."""
+def test_invalid_json_retry_tells_model_to_return_one_json_object() -> None:
+    """A parse failure should receive corrective feedback without echoing output."""
+
+    class InvalidJsonOnceController:
+        def __init__(self) -> None:
+            self.requests: list[ActionRequest] = []
+
+        def act(self, _view, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                msg = "LLM did not return JSON: rejected private model output"
+                raise RuntimeError(msg)
+            return AgentResponse(text="已按要求返回完整 JSON。")
+
+    controller = InvalidJsonOnceController()
+    game = Game(
+        llm_seat_config(controller_retries=1, strict_controllers=True),
+        controllers={"p1": controller},
+        terminal=SilentTerminal(),
+    )
+    game.phase = "discussion"
+
+    response = game._act(  # noqa: SLF001
+        game._by_id["p1"],  # noqa: SLF001
+        ActionRequest(ActionKind.SPEAK, "发言", requires_text=True),
+    )
+
+    assert response.text == "已按要求返回完整 JSON。"
+    feedback = controller.requests[1].retry_feedback
+    assert "完整 JSON 对象" in feedback
+    assert "choice 或 text" in feedback
+    assert "rejected private model output" not in feedback
+
+
+def test_strict_mode_reports_that_a_model_omitted_required_text() -> None:
+    """An exhausted retry budget should expose a safe, actionable category."""
     game = Game(
         llm_seat_config(controller_retries=0, strict_controllers=True),
         controllers={"p1": RecordingController([AgentResponse(text="")])},
@@ -1588,7 +1635,7 @@ def test_strict_mode_reports_a_silent_model_as_an_invalid_response() -> None:
     )
     game.phase = "discussion"
 
-    with pytest.raises(RuntimeError, match="invalid response"):
+    with pytest.raises(RuntimeError, match="missing required text"):
         game._act(  # noqa: SLF001
             game._by_id["p1"],  # noqa: SLF001
             ActionRequest(ActionKind.SPEAK, "发言", requires_text=True),
