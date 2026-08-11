@@ -1425,6 +1425,10 @@ def test_illegal_llm_choice_is_retried_with_a_judge_explanation() -> None:
     assert controller.requests[0].retry_feedback == ""
     assert "合法选项" in controller.requests[1].retry_feedback
     assert game._controller_metrics.retries == 1  # noqa: SLF001
+    assert game._controller_metrics.failure_breakdown == {  # noqa: SLF001
+        "vote/illegal choice": 1,
+    }
+    assert "vote/illegal choice=1" in game._controller_reliability_text()  # noqa: SLF001
 
 
 def test_omitted_llm_choice_is_retried_before_explicit_abstention() -> None:
@@ -1462,6 +1466,9 @@ def test_omitted_llm_choice_is_retried_before_explicit_abstention() -> None:
         "missing required choice" in item for item in terminal.transient_progress_events
     )
     assert game._controller_metrics.retries == 1  # noqa: SLF001
+    assert game._controller_metrics.failure_breakdown == {  # noqa: SLF001
+        "vote/missing required choice": 1,
+    }
 
 
 def test_silent_model_statement_is_retried_but_people_may_still_pass() -> None:

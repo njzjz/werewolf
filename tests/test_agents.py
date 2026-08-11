@@ -154,6 +154,135 @@ def test_llm_tracks_explicit_null_separately_from_an_omitted_choice() -> None:
     assert explicit.choice_provided is True
 
 
+def test_choice_action_uses_a_required_enum_schema_and_minimal_contract() -> None:
+    """Selection calls should make an omitted or out-of-range choice impossible."""
+    captured: dict[str, Any] = {}
+
+    def transport(payload: dict[str, Any]) -> dict[str, Any]:
+        captured.update(copy.deepcopy(payload))
+        return {"choices": [{"message": {"content": '{"choice":"p3"}'}}]}
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+        transport=transport,
+    )
+    request = ActionRequest(
+        ActionKind.VOTE,
+        "请投票",
+        (
+            ActionOption("p3", "3号 智能体3"),
+            ActionOption("p4", "4号 智能体4"),
+        ),
+        allow_abstain=True,
+    )
+
+    response = LLMController(client).act(seat_view(), request)
+
+    schema = captured["response_format"]["json_schema"]["schema"]
+    assert captured["response_format"]["type"] == "json_schema"
+    assert schema == {
+        "type": "object",
+        "properties": {"choice": {"enum": ["p3", "p4", None]}},
+        "required": ["choice"],
+        "additionalProperties": False,
+    }
+    assert "choice 是唯一字段且绝对不能省略" in captured["messages"][-1]["content"]
+    assert response.choice == "p3"
+
+
+def test_choice_schema_falls_back_once_for_older_compatible_providers() -> None:
+    """A gateway without JSON Schema support should retain minimal JSON mode."""
+    captured: list[dict[str, Any]] = []
+
+    def transport(payload: dict[str, Any]) -> dict[str, Any]:
+        captured.append(copy.deepcopy(payload))
+        if payload.get("response_format", {}).get("type") == "json_schema":
+            raise ProviderHTTPError(400, unsupported_field="response_format")
+        return {"choices": [{"message": {"content": '{"choice":"p3"}'}}]}
+
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+        transport=transport,
+    )
+    request = ActionRequest(
+        ActionKind.VOTE,
+        "请投票",
+        (ActionOption("p3", "3号 智能体3"),),
+    )
+
+    response = LLMController(client).act(seat_view(), request)
+
+    assert [item["response_format"]["type"] for item in captured] == [
+        "json_schema",
+        "json_object",
+    ]
+    assert client._json_schema_support is False  # noqa: SLF001
+    assert response.choice == "p3"
+
+
+def test_choice_schema_uses_the_responses_text_format_shape() -> None:
+    """Responses API providers receive their native strict-schema envelope."""
+    client = OpenAICompatibleClient(
+        LLMProviderConfig(
+            base_url="https://example.invalid/v1",
+            model="test",
+            wire_api="responses",
+        ),
+    )
+    schema = {
+        "type": "object",
+        "properties": {"choice": {"enum": ["p3"]}},
+        "required": ["choice"],
+        "additionalProperties": False,
+    }
+
+    payload = client._payload([], response_schema=schema)  # noqa: SLF001
+
+    assert payload["text"]["format"] == {
+        "type": "json_schema",
+        "name": "werewolf_action",
+        "strict": True,
+        "schema": schema,
+    }
+
+
+def test_llm_conservatively_recovers_one_explicit_choice_from_prose() -> None:
+    """A stranded explicit vote may be applied, but an ambiguous list may not."""
+    outputs = iter(
+        (
+            '{"thought":"今天会投3号 智能体3。"}',
+            '{"thought":"在3号 智能体3和4号 智能体4之间比较。"}',
+        ),
+    )
+
+    def transport(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {"choices": [{"message": {"content": next(outputs)}}]}
+
+    controller = LLMController(
+        OpenAICompatibleClient(
+            LLMProviderConfig(base_url="https://example.invalid/v1", model="test"),
+            transport=transport,
+        ),
+    )
+    request = ActionRequest(
+        ActionKind.VOTE,
+        "请投票",
+        (
+            ActionOption("p3", "3号 智能体3"),
+            ActionOption("p4", "4号 智能体4"),
+        ),
+        allow_abstain=True,
+    )
+
+    recovered = controller.act(seat_view(), request)
+    ambiguous = controller.act(seat_view(), request)
+
+    assert recovered.choice == "p3"
+    assert recovered.choice_provided is True
+    assert ambiguous.choice is None
+    assert ambiguous.choice_provided is False
+
+
 def test_llm_does_not_force_an_empty_history_lookup() -> None:
     """Opening actions may use tools, but should not pay for a useless forced call."""
     captured: dict[str, Any] = {}
@@ -1070,7 +1199,7 @@ def test_llm_prompt_states_the_public_seat_the_player_must_claim() -> None:
     assert "名字恰好是“你”" in messages[0]["content"]
     assert "不得用后来出现的白天发言" in messages[0]["content"]
     assert "不得逐句复述" in messages[0]["content"]
-    assert "text 不能为空" in messages[0]["content"]
+    assert "text 必须非空" in messages[-1]["content"]
     assert "必须提供 text：True" in messages[-1]["content"]
 
 
