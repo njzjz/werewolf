@@ -60,7 +60,7 @@ _PRESET_DESCRIPTIONS = {
     "classic": "6–16 人，按人数自动生成平衡牌组",
     "killer": "6–16 人，杀手与警察随人数扩展，夜间行凶与查证",
     "ghost_similar": "6–16 人，幽灵人数随桌型扩展，只走白天",
-    "ghost_blank": "6–16 人，互认幽灵无词可猜，只走白天",
+    "ghost_blank": "6–16 人，LLM 随机出词，鬼全出局后团队猜词",
     "movie_basic": "10 人：基础电影牌组",
     "movie_crazy_fox": "12 人：加入灵媒、守卫与妖狐",
     "movie_prison_break": "12 人：加入共有者与狂人",

@@ -86,9 +86,11 @@ werewolf setup local.json --no-color
 | --------------- | -------------- |
 | `killer`        | 6–16 人杀人游戏；杀手与警察随人数扩展，其余为平民 |
 | `ghost_similar` | 6–16 人捉鬼近义词版；幽灵随人数扩展，其余为水民 |
-| `ghost_blank`   | 6–16 人捉鬼无词版；互认幽灵随人数扩展，其余为水民 |
+| `ghost_blank`   | 6–16 人捉鬼无词版；互认的鬼随人数扩展，其余身份为人 |
 
-模式和玩家人数可以独立设置。默认牌组在 6–11 人配置 2 名敌对角色，12–15 人配置 3 名，16 人配置 4 名；杀人游戏同时配置同等数量的警察。三个 8 人真人加本地 bot 示例位于 `examples/killer.json`、`examples/ghost_similar.json` 和 `examples/ghost_blank.json`。捉鬼模式由 preset 自动跳过夜晚；无词版被投出的幽灵会进入一次必答猜词动作。
+模式和玩家人数可以独立设置。默认牌组在 6–11 人配置 2 名敌对角色，12–15 人配置 3 名，16 人配置 4 名；杀人游戏同时配置同等数量的警察。三个 8 人真人加本地 bot 示例位于 `examples/killer.json`、`examples/ghost_similar.json` 和 `examples/ghost_blank.json`。捉鬼模式由 preset 自动跳过夜晚。无词版必须配置至少一个 LLM Provider，开局由它随机生成词牌并公开字数和类型；全部鬼出局后先进行鬼队私密讨论，再使用 1 次基础猜词机会，并为每名出局的人增加一次，鬼出局不增加次数。
+
+无词版优先使用配置顺序中第一名 LLM 玩家的 Provider 出词；若没有 LLM 玩家，则使用名为 `default` 的 Provider，或配置中唯一的 Provider。多个 Provider 并存、又没有 `default` 或 LLM 玩家引用时属于歧义配置，启动会报错；可将出词 Provider 命名为 `default`，或让首名 LLM 玩家引用它。生成出的答案只进入持词玩家的私密记忆和恢复点，公开频道只看到字数与类型。
 
 需要自由组合身份牌时，使用 `roles` 计数表；计数总和必须等于玩家人数：
 
@@ -104,7 +106,7 @@ werewolf setup local.json --no-color
 }
 ```
 
-支持的身份名为 `villager`、`werewolf`、`police`、`seer`、`witch`、`hunter`、`medium`、`bodyguard`、`madman`、`fox`、`cupid` 和 `shared`。内置新模式会把内部的 `werewolf`/`villager` 显示为杀手/平民或幽灵/水民；`police` 用于杀人游戏。共有者必须为 0 或 2 张；妖狐与丘比特不能同时启用；预言家、女巫等单例身份不能重复。
+支持的身份名为 `villager`、`werewolf`、`police`、`seer`、`witch`、`hunter`、`medium`、`bodyguard`、`madman`、`fox`、`cupid` 和 `shared`。内置新模式会把内部的 `werewolf`/`villager` 显示为杀手/平民、幽灵/水民或无词版的鬼/人；`police` 用于杀人游戏。共有者必须为 0 或 2 张；妖狐与丘比特不能同时启用；预言家、女巫等单例身份不能重复。
 
 整副牌默认洗牌。若主持人要指定少数玩家的身份，可只给这些玩家填写 `fixed_role`，未指定玩家继续从剩余牌堆随机抽取：
 

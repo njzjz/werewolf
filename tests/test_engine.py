@@ -255,6 +255,13 @@ def fixed_role_config(
     )
 
 
+def fixed_ghost_word(language: str) -> tuple[str, str]:
+    """Return a stable no-word card without calling a provider in unit tests."""
+    if language == "en":
+        return "subway", "transportation term"
+    return "地铁", "交通工具"
+
+
 MOVIE_PRESETS = {
     "movie_basic": Counter(
         {
@@ -375,7 +382,11 @@ def test_social_mode_role_decks_scale_independently_from_player_count(
 def test_social_mode_configs_accept_non_eight_player_tables(preset: str) -> None:
     """Configuration validation and role assignment must honor twelve seats."""
     config = demo_config(12, seed=7, role_preset=preset)
-    game = Game(config, terminal=SilentTerminal())
+    game = Game(
+        config,
+        terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word if preset == "ghost_blank" else None,
+    )
     board_skill_name = f"board_{preset}"
 
     assert len(config.players) == 12
@@ -391,9 +402,12 @@ def test_social_mode_configs_accept_non_eight_player_tables(preset: str) -> None
     )
     if preset == "killer":
         assert "3 名杀手、3 名警察和 6 名平民" in board_skill.instructions
-    else:
+    elif preset == "ghost_similar":
         assert "9 名水民" in board_skill.instructions
         assert "3 名幽灵" in board_skill.instructions
+    else:
+        assert "9 名【人】" in board_skill.instructions
+        assert "3 名【鬼】" in board_skill.instructions
 
 
 def test_daily_discussion_uses_a_seeded_circular_starting_seat() -> None:
@@ -706,6 +720,7 @@ def test_ghost_modes_start_with_daytime_and_never_enter_night(
     game = Game(
         fixed_role_config(roles, preset),
         terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word if preset == "ghost_blank" else None,
     )
     daytime_days: list[int] = []
 
@@ -756,29 +771,37 @@ def test_similar_word_ghosts_receive_a_different_word_without_a_roster() -> None
 
 
 def test_blank_ghosts_receive_no_word_and_are_told_to_infer_it() -> None:
-    """Blank Ghosts receive no decoy word and privately learn their teammate."""
+    """Blank Ghosts receive the public type, no word, and their private roster."""
     roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
     game = Game(
         fixed_role_config(roles, "ghost_blank"),
         terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word,
     )
 
     game._setup()  # noqa: SLF001
 
     assert game._ghost_word_pair is not None  # noqa: SLF001
     water_word, ghost_word = game._ghost_word_pair  # noqa: SLF001
-    assert water_word
+    assert water_word == "地铁"
     assert ghost_word == ""
+    assert game._ghost_word_type == "2字交通工具"  # noqa: SLF001
+    public_events = game._by_id["p3"].memory.events  # noqa: SLF001
+    assert any(
+        event.visibility is Visibility.PUBLIC
+        and event.text == f"本局词语类型：{game._ghost_word_type}。"  # noqa: SLF001
+        for event in public_events
+    )
     for player_id in ("p1", "p2"):
         events = game._by_id[player_id].memory.events  # noqa: SLF001
         assert any(
-            "本局没有词牌" in event.text and "根据水民的公开描述猜出" in event.text
+            "本局没有词牌" in event.text and "根据人的公开描述猜出" in event.text
             for event in events
         )
         assert any(
             event.visibility is Visibility.WEREWOLF
-            and "无词幽灵队友名单：1号 玩家1、2号 玩家2" in event.text
-            and "被投出时" in event.text
+            and "鬼队友名单：1号 玩家1、2号 玩家2" in event.text
+            and "全部鬼出局后" in event.text
             for event in events
         )
     for player_id in ("p3", "p4", "p5", "p6", "p7", "p8"):
@@ -792,19 +815,82 @@ def test_blank_ghosts_receive_no_word_and_are_told_to_infer_it() -> None:
         )
 
 
-def test_eliminated_blank_ghost_can_guess_the_word_for_an_immediate_win() -> None:
-    """A correct one-word guess should override the ordinary all-Ghosts-out result."""
+def test_blank_ghost_word_is_generated_by_the_configured_llm() -> None:
+    """No-word setup should request a fresh answer/category JSON card from an LLM."""
     roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
-    ghost = ScriptedController()
+    provider = LLMProviderConfig(
+        base_url="https://example.invalid/v1",
+        model="word-generator",
+        stream=False,
+    )
+    config = replace(
+        fixed_role_config(roles, "ghost_blank"),
+        providers={"default": provider},
+    )
+    captured: dict[str, object] = {}
+
+    def transport(payload):
+        captured.update(payload)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"word":"地铁","category":"交通工具"}',
+                    },
+                    "finish_reason": "stop",
+                },
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+
+    game = Game(config, terminal=SilentTerminal())
+    game._ghost_word_client = OpenAICompatibleClient(  # noqa: SLF001
+        provider,
+        transport=transport,
+    )
+
+    game._setup()  # noqa: SLF001
+
+    assert game._ghost_word_pair == ("地铁", "")  # noqa: SLF001
+    assert game._ghost_word_type == "2字交通工具"  # noqa: SLF001
+    response_format = captured["response_format"]
+    assert isinstance(response_format, dict)
+    assert response_format["type"] == "json_schema"
+    assert "随机生成" in captured["messages"][1]["content"]
+
+
+def test_blank_ghost_requires_a_word_generation_provider() -> None:
+    """A normal no-word game must not silently fall back to a static word list."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+
+    with pytest.raises(ValueError, match="requires an LLM provider"):
+        Game(
+            fixed_role_config(roles, "ghost_blank"),
+            terminal=SilentTerminal(),
+        )
+
+
+def test_blank_ghosts_guess_only_after_all_are_out_and_can_steal_the_win() -> None:
+    """The team discusses after its final elimination, then a correct guess wins."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    first = ScriptedController(
+        {
+            ActionKind.TEAM_CHAT: [AgentResponse(text="最可能是目标词")],
+        },
+    )
+    second = ScriptedController(
+        {ActionKind.TEAM_CHAT: [AgentResponse(text="同意，按该方向猜")]},
+    )
     game = Game(
         fixed_role_config(roles, "ghost_blank"),
-        controllers={"p1": ghost},
+        controllers={"p1": first, "p2": second},
         terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word,
     )
     game._setup()  # noqa: SLF001
     assert game._ghost_word_pair is not None  # noqa: SLF001
     water_word = game._ghost_word_pair[0]  # noqa: SLF001
-    ghost.responses[ActionKind.GHOST_GUESS] = [
+    first.responses[ActionKind.GHOST_GUESS] = [
         AgentResponse(text=f"【{water_word}】。"),
     ]
     game.day = 1
@@ -813,25 +899,50 @@ def test_eliminated_blank_ghost_can_guess_the_word_for_an_immediate_win() -> Non
         {"p1": {DeathCause.VOTE}},
         "1号 玩家1 被放逐。",
     )
+    assert game._ghost_guess_won is False  # noqa: SLF001
+    assert game._winner() is None  # noqa: SLF001
+    assert all(request.kind is not ActionKind.GHOST_GUESS for request in first.requests)
+
+    game._apply_deaths(  # noqa: SLF001
+        {"p2": {DeathCause.VOTE}},
+        "2号 玩家2 被放逐。",
+    )
 
     assert game._ghost_guess_won is True  # noqa: SLF001
     assert game._winner() is Faction.WEREWOLF  # noqa: SLF001
     assert any(
-        "无词幽灵翻盘成功" in event.text
+        "鬼队翻盘成功" in event.text
         for event in game._by_id["p3"].memory.events  # noqa: SLF001
     )
-    assert [request.kind for request in ghost.requests].count(
+    assert [request.kind for request in first.requests].count(
         ActionKind.GHOST_GUESS,
     ) == 1
+    assert [request.kind for request in second.requests].count(
+        ActionKind.GHOST_GUESS,
+    ) == 0
+    first_team_events = [
+        event
+        for event in game._by_id["p1"].memory.events  # noqa: SLF001
+        if event.phase == "ghost_finale" and event.visibility is Visibility.WEREWOLF
+    ]
+    assert any("最可能是目标词" in event.text for event in first_team_events)
+    assert any("同意，按该方向猜" in event.text for event in first_team_events)
+    assert all(
+        event.visibility is not Visibility.WEREWOLF
+        for event in game._by_id["p3"].memory.events  # noqa: SLF001
+    )
 
 
-def test_each_eliminated_blank_ghost_gets_one_guess_and_wrong_guesses_continue() -> (
-    None
-):
-    """A missed guess should not consume the surviving teammate's later chance."""
+def test_blank_ghost_finale_adds_one_guess_per_eliminated_human() -> None:
+    """The base guess grows only with eliminated Humans, never eliminated Ghosts."""
     roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
     first = ScriptedController(
-        {ActionKind.GHOST_GUESS: [AgentResponse(text="错误答案一")]},
+        {
+            ActionKind.GHOST_GUESS: [
+                AgentResponse(text="错误答案一"),
+                AgentResponse(text="错误答案三"),
+            ],
+        },
     )
     second = ScriptedController(
         {ActionKind.GHOST_GUESS: [AgentResponse(text="错误答案二")]},
@@ -842,9 +953,12 @@ def test_each_eliminated_blank_ghost_gets_one_guess_and_wrong_guesses_continue()
         config,
         controllers={"p1": first, "p2": second},
         terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word,
     )
     game._setup()  # noqa: SLF001
     game.day = 1
+    game._by_id["p3"].alive = False  # noqa: SLF001
+    game._by_id["p4"].alive = False  # noqa: SLF001
 
     game._apply_deaths(  # noqa: SLF001
         {"p1": {DeathCause.VOTE}},
@@ -852,6 +966,7 @@ def test_each_eliminated_blank_ghost_gets_one_guess_and_wrong_guesses_continue()
     )
     assert game._ghost_guess_won is False  # noqa: SLF001
     assert game._winner() is None  # noqa: SLF001
+    assert all(request.kind is not ActionKind.GHOST_GUESS for request in first.requests)
 
     game._apply_deaths(  # noqa: SLF001
         {"p2": {DeathCause.VOTE}},
@@ -862,10 +977,14 @@ def test_each_eliminated_blank_ghost_gets_one_guess_and_wrong_guesses_continue()
     assert game._winner() is Faction.GOOD  # noqa: SLF001
     assert [request.kind for request in first.requests].count(
         ActionKind.GHOST_GUESS,
-    ) == 1
+    ) == 2
     assert [request.kind for request in second.requests].count(
         ActionKind.GHOST_GUESS,
     ) == 1
+    assert any(
+        "基础 1 次机会，加上 2 名出局的人，共有 3 次终局猜词机会" in event.text
+        for event in game._by_id["p5"].memory.events  # noqa: SLF001
+    )
 
 
 def test_similar_word_ghosts_do_not_receive_a_final_guess() -> None:
@@ -899,6 +1018,7 @@ def test_ghost_survival_win_waits_until_only_one_water_civilian_remains(
     game = Game(
         fixed_role_config(roles, preset),
         terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word if preset == "ghost_blank" else None,
     )
     for player_id in ("p3", "p4", "p5", "p6"):
         game._by_id[player_id].alive = False  # noqa: SLF001
@@ -919,6 +1039,7 @@ def test_ghost_modes_disable_last_words_to_protect_the_secret_word(
     game = Game(
         fixed_role_config(roles, preset),
         terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word if preset == "ghost_blank" else None,
     )
     game.day = 1
 
@@ -937,7 +1058,11 @@ def test_ghost_checkpoint_preserves_the_private_word_setup(
         fixed_role_config(roles, preset),
         checkpoint_path=str(checkpoint),
     )
-    game = Game(config, terminal=SilentTerminal())
+    game = Game(
+        config,
+        terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word if preset == "ghost_blank" else None,
+    )
     game._setup()  # noqa: SLF001
     original_pair = game._ghost_word_pair  # noqa: SLF001
     game._save_checkpoint(next_day=1, next_step="daytime")  # noqa: SLF001
@@ -946,17 +1071,20 @@ def test_ghost_checkpoint_preserves_the_private_word_setup(
         config,
         terminal=SilentTerminal(),
         resume_checkpoint=checkpoint,
+        ghost_word_generator=fixed_ghost_word if preset == "ghost_blank" else None,
     )
 
     assert resumed._ghost_word_pair == original_pair  # noqa: SLF001
+    assert resumed._ghost_word_type == game._ghost_word_type  # noqa: SLF001
     assert resumed._ghost_guess_won is False  # noqa: SLF001
+    assert resumed._ghost_guess_resolved is False  # noqa: SLF001
 
 
 @pytest.mark.parametrize(
     ("preset", "word_reveal"),
     [
         ("ghost_similar", "幽灵【"),
-        ("ghost_blank", "幽灵没有词牌"),
+        ("ghost_blank", "鬼没有词牌"),
     ],
 )
 def test_ghost_modes_force_death_flips_and_reveal_words_at_settlement(
@@ -967,7 +1095,11 @@ def test_ghost_modes_force_death_flips_and_reveal_words_at_settlement(
     roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
     config = fixed_role_config(roles, preset)
     config = replace(config, rules=replace(config.rules, last_words=False))
-    game = Game(config, terminal=SilentTerminal())
+    game = Game(
+        config,
+        terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word if preset == "ghost_blank" else None,
+    )
     game._setup()  # noqa: SLF001
     game.day = 1
 
@@ -975,15 +1107,17 @@ def test_ghost_modes_force_death_flips_and_reveal_words_at_settlement(
         {"p1": {DeathCause.VOTE}},
         "1号 玩家1 被放逐。",
     )
+    expected_role = "鬼" if preset == "ghost_blank" else "幽灵"
     assert any(
-        "身份公开：1号 玩家1=幽灵" in event.text
+        f"身份公开：1号 玩家1={expected_role}" in event.text
         for event in game._by_id["p3"].memory.events  # noqa: SLF001
     )
 
     game._finish(Faction.GOOD, "test")  # noqa: SLF001
     settlement = game._by_id["p3"].memory.events[-1].text  # noqa: SLF001
     assert "全部身份：" in settlement
-    assert "词牌揭晓：水民【" in settlement
+    clue_holder = "人" if preset == "ghost_blank" else "水民"
+    assert f"词牌揭晓：{clue_holder}【" in settlement
     assert word_reveal in settlement
 
 
@@ -992,7 +1126,7 @@ def test_ghost_modes_force_death_flips_and_reveal_words_at_settlement(
     [
         ("killer", "杀人游戏", "杀手", "杀手"),
         ("ghost_similar", "捉鬼游戏·近义词版", "幽灵", "幽灵"),
-        ("ghost_blank", "捉鬼游戏·无词版", "幽灵", "幽灵"),
+        ("ghost_blank", "捉鬼游戏·无词版", "鬼", "鬼"),
     ],
 )
 def test_player_views_and_role_skills_are_themed_for_social_modes(
@@ -1010,6 +1144,7 @@ def test_player_views_and_role_skills_are_themed_for_social_modes(
     game = Game(
         fixed_role_config(roles, preset),
         terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word if preset == "ghost_blank" else None,
     )
     view = game._view(game._by_id["p1"])  # noqa: SLF001
     role_skill = next(skill for skill in view.skills if skill.name == "role_werewolf")
@@ -1031,8 +1166,29 @@ def test_player_views_and_role_skills_are_themed_for_social_modes(
         assert "本局没有夜晚或身份能力" in global_skill.instructions
         assert "刀口" not in global_skill.instructions
         if preset == "ghost_blank":
-            assert "知道无词幽灵队友" in role_skill.instructions
-            assert "一次公开猜词机会" in role_skill.instructions
+            assert "记住开局公布的词语类型和鬼队友" in role_skill.instructions
+            assert "每有一名人出局再增加一次" in role_skill.instructions
+            assert "鬼出局不增加" in role_skill.instructions
+            assert "身份只有鬼和人" in global_skill.instructions
+
+
+def test_blank_human_skill_limits_each_clue_to_low_information() -> None:
+    """Human guidance should resist reconstructing the answer across turns."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    game = Game(
+        fixed_role_config(roles, "ghost_blank"),
+        terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word,
+    )
+
+    view = game._view(game._by_id["p3"])  # noqa: SLF001
+    role_skill = next(skill for skill in view.skills if skill.name == "role_villager")
+
+    assert view.role_name == "人"
+    assert "每轮只给一个真实但低辨识度的间接维度" in role_skill.instructions
+    assert "不要在一句话里叠加" in role_skill.instructions
+    assert "后续轮次宁可维持抽象度" in role_skill.instructions
+    assert "若结合公开类型后能把答案缩到少数几个常见词" in role_skill.instructions
 
 
 def test_ghost_mechanical_context_uses_the_one_water_survival_rule() -> None:
@@ -1050,6 +1206,25 @@ def test_ghost_mechanical_context_uses_the_one_water_survival_rule() -> None:
 
     assert "至少有一名幽灵和两名水民" in context
     assert "至多有" not in context
+
+
+def test_blank_ghost_mechanical_context_uses_ghost_and_human_labels() -> None:
+    """The no-word variant should not reintroduce its former role labels."""
+    roles = [Role.WEREWOLF, Role.WEREWOLF, *([Role.VILLAGER] * 6)]
+    game = Game(
+        fixed_role_config(roles, "ghost_blank"),
+        terminal=SilentTerminal(),
+        ghost_word_generator=fixed_ghost_word,
+    )
+    game.day = 2
+    game.phase = "vote"
+    game._record_nonterminal_snapshot("day_vote")  # noqa: SLF001
+
+    context = game._mechanical_context()  # noqa: SLF001
+
+    assert "至少有一名鬼和两名人" in context
+    assert "幽灵" not in context
+    assert "水民" not in context
 
 
 def test_run_checks_terminal_conditions_immediately_after_setup() -> None:
@@ -2986,6 +3161,8 @@ def test_social_mode_example_configs_are_loadable(
     assert len(config.players) == 8
     assert config.players[0].name == "真人玩家"
     assert config.players[0].controller == "human"
+    if preset == "ghost_blank":
+        assert "default" in config.providers
 
 
 def test_offline_game_completes_and_exports_separate_memories(tmp_path: Path) -> None:

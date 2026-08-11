@@ -33,7 +33,7 @@ def test_init_can_request_the_exhaustive_reference_template() -> None:
     assert args.full is True
 
 
-@pytest.mark.parametrize("preset", ["killer", "ghost_similar", "ghost_blank"])
+@pytest.mark.parametrize("preset", ["killer", "ghost_similar"])
 def test_demo_accepts_each_social_deduction_mode(preset: str) -> None:
     """The social modes should be directly discoverable from the demo CLI."""
     args = build_parser().parse_args(["demo", "--preset", preset])
@@ -41,7 +41,7 @@ def test_demo_accepts_each_social_deduction_mode(preset: str) -> None:
     assert args.preset == preset
 
 
-@pytest.mark.parametrize("preset", ["killer", "ghost_similar", "ghost_blank"])
+@pytest.mark.parametrize("preset", ["killer", "ghost_similar"])
 def test_demo_accepts_player_count_independently_from_social_mode(
     preset: str,
 ) -> None:
@@ -52,6 +52,12 @@ def test_demo_accepts_player_count_independently_from_social_mode(
 
     assert args.preset == preset
     assert args.players == 12
+
+
+def test_demo_rejects_blank_ghost_without_an_llm_provider() -> None:
+    """The no-word variant cannot claim to be an API-free local demo."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["demo", "--preset", "ghost_blank"])
 
 
 def test_configure_exposes_the_interactive_workbench_aliases() -> None:
