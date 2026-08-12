@@ -72,6 +72,22 @@ class LLMProviderConfig:
 
 
 @dataclass(frozen=True)
+class SkillOverrideConfig:
+    """One experimental replacement for an active prompt skill.
+
+    Overrides are attached to a player rather than a role assignment. If the
+    named skill is inactive for that player's role in a particular match, the
+    override is simply dormant. This permits one arena population to carry
+    competing role strategies through randomized seats and role draws.
+    """
+
+    name: str
+    version: str
+    instructions: str
+    description: str | None = None
+
+
+@dataclass(frozen=True)
 class PlayerConfig:
     """A seat and its controller-specific behavior settings."""
 
@@ -81,6 +97,7 @@ class PlayerConfig:
     persona: str = ""
     skills: tuple[str, ...] = ("logic", "memory")
     fixed_role: Role | None = None
+    skill_overrides: tuple[SkillOverrideConfig, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -127,6 +144,7 @@ class GameConfig:
     max_parallel_llm_requests: int = 2
     enable_tools: bool = True
     max_tool_rounds: int = 2
+    training_trajectory_path: str | None = None
 
 
 def _object(value: object, path: str) -> dict[str, Any]:
@@ -234,6 +252,30 @@ def _provider_from_dict(raw: object, *, path: str) -> LLMProviderConfig:
     )
 
 
+def _skill_override_from_value(raw: object, *, path: str) -> SkillOverrideConfig:
+    """Parse one explicit experimental skill replacement."""
+    values = _object(raw, path)
+    _reject_unknown(values, set(SkillOverrideConfig.__dataclass_fields__), path)
+    return SkillOverrideConfig(
+        name=(_string(_required(values, "name", path), f"{path}.name") or "").strip(),
+        version=(
+            _string(_required(values, "version", path), f"{path}.version") or ""
+        ).strip(),
+        instructions=(
+            _string(
+                _required(values, "instructions", path),
+                f"{path}.instructions",
+            )
+            or ""
+        ).strip(),
+        description=_string(
+            values.get("description"),
+            f"{path}.description",
+            allow_none=True,
+        ),
+    )
+
+
 def _player_from_dict(
     raw: dict[str, Any],
     *,
@@ -259,6 +301,10 @@ def _player_from_dict(
     ):
         msg = f"{path}.skills must be an array of strings"
         raise TypeError(msg)
+    overrides = raw.get("skill_overrides", [])
+    if not isinstance(overrides, list):
+        msg = f"{path}.skill_overrides must be an array of objects"
+        raise TypeError(msg)
     return PlayerConfig(
         name=(_string(_required(raw, "name", path), f"{path}.name") or "").strip(),
         controller=controller,
@@ -266,6 +312,10 @@ def _player_from_dict(
         persona=_string(raw.get("persona", ""), f"{path}.persona") or "",
         skills=tuple(skills),
         fixed_role=Role(fixed_role) if fixed_role else None,
+        skill_overrides=tuple(
+            _skill_override_from_value(value, path=f"{path}.skill_overrides[{index}]")
+            for index, value in enumerate(overrides)
+        ),
     )
 
 
@@ -479,6 +529,11 @@ def load_config(path: str | Path) -> GameConfig:
             raw.get("max_tool_rounds", 2),
             "max_tool_rounds",
         ),
+        training_trajectory_path=_string(
+            raw.get("training_trajectory_path"),
+            "training_trajectory_path",
+            allow_none=True,
+        ),
     )
     validate_config(config)
     return config
@@ -556,6 +611,23 @@ def validate_config(config: GameConfig) -> None:
             msg = f"Unsupported controller {player.controller!r} for {player.name}"
             raise ValueError(msg)
         resolve_skills(list(player.skills))
+        override_names = [override.name for override in player.skill_overrides]
+        if len(set(override_names)) != len(override_names):
+            msg = f"Player {player.name!r} contains duplicate skill overrides"
+            raise ValueError(msg)
+        if any(
+            not override.name
+            or not override.version
+            or not override.instructions
+            or override.name != override.name.strip()
+            or override.version != override.version.strip()
+            for override in player.skill_overrides
+        ):
+            msg = (
+                f"Player {player.name!r} skill overrides require non-empty "
+                "name, version, and instructions"
+            )
+            raise ValueError(msg)
         if player.controller == "llm" and (
             not player.provider or player.provider not in config.providers
         ):
@@ -627,6 +699,7 @@ def _validate_runtime_schema(config: GameConfig) -> None:
         "memory_directory",
         "public_transcript_path",
         "checkpoint_path",
+        "training_trajectory_path",
     ):
         _string(getattr(config, field_name), field_name, allow_none=True)
     if not isinstance(config.players, tuple) or not all(
@@ -663,6 +736,24 @@ def _validate_runtime_schema(config: GameConfig) -> None:
         if player.fixed_role is not None and not isinstance(player.fixed_role, Role):
             msg = f"{path}.fixed_role must be a Role or null"
             raise TypeError(msg)
+        if not isinstance(player.skill_overrides, tuple) or not all(
+            isinstance(override, SkillOverrideConfig)
+            for override in player.skill_overrides
+        ):
+            msg = (
+                f"{path}.skill_overrides must be a tuple of SkillOverrideConfig values"
+            )
+            raise TypeError(msg)
+        for override_index, override in enumerate(player.skill_overrides):
+            override_path = f"{path}.skill_overrides[{override_index}]"
+            _string(override.name, f"{override_path}.name")
+            _string(override.version, f"{override_path}.version")
+            _string(override.instructions, f"{override_path}.instructions")
+            _string(
+                override.description,
+                f"{override_path}.description",
+                allow_none=True,
+            )
     for name, provider in config.providers.items():
         path = f"providers.{name}"
         for field_name in ("base_url", "model", "wire_api"):
@@ -716,6 +807,7 @@ def _validate_runtime_schema(config: GameConfig) -> None:
             ("checkpoint_path", config.checkpoint_path),
             ("public_transcript_path", config.public_transcript_path),
             ("memory_directory", config.memory_directory),
+            ("training_trajectory_path", config.training_trajectory_path),
         )
         if value is not None
     }
@@ -810,6 +902,7 @@ def example_config() -> dict[str, Any]:
         "max_parallel_llm_requests": 2,
         "enable_tools": True,
         "max_tool_rounds": 2,
+        "training_trajectory_path": None,
         "providers": {
             "default": {
                 "base_url": "https://api.openai.com/v1",
@@ -883,6 +976,7 @@ def config_to_dict(config: GameConfig) -> dict[str, Any]:
         "max_parallel_llm_requests": config.max_parallel_llm_requests,
         "enable_tools": config.enable_tools,
         "max_tool_rounds": config.max_tool_rounds,
+        "training_trajectory_path": config.training_trajectory_path,
         "providers": {
             name: asdict(provider) for name, provider in config.providers.items()
         },
@@ -897,6 +991,9 @@ def config_to_dict(config: GameConfig) -> dict[str, Any]:
                 "fixed_role": (
                     player.fixed_role.value if player.fixed_role is not None else None
                 ),
+                "skill_overrides": [
+                    asdict(override) for override in player.skill_overrides
+                ],
             }
             for player in config.players
         ],

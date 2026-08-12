@@ -1816,6 +1816,71 @@ def test_short_model_statement_without_terminal_punctuation_is_allowed() -> None
     assert response.text == "今天投3号"
 
 
+def test_near_verbatim_public_speech_is_retried() -> None:
+    """A model must add an independent judgment instead of copying a prior seat."""
+    copied = (
+        "先做事实核对，目前只有1号单方面声明神职，无对跳所以我不会首日投他。"
+        "我的观察重点是3号的转述错误，他先立靶再修正，容易带偏节奏。"
+        "目前排序是3号高于2号，其余保留，最终票型要与发言一致。"
+    )
+    controller = RecordingController(
+        [
+            AgentResponse(text=copied),
+            AgentResponse(text="我独立核对到3号误引了10号原话，因此今天优先投3号。"),
+        ],
+    )
+    game = Game(
+        llm_seat_config(controller_retries=1, strict_controllers=True),
+        controllers={"p1": controller},
+        terminal=SilentTerminal(),
+    )
+    game.day = 1
+    game.phase = "discussion"
+    game.boundary.public(
+        day=1,
+        phase="discussion",
+        sender=game._player_label(game._by_id["p2"]),  # noqa: SLF001
+        text=f"2号 玩家2：{copied}",
+    )
+
+    response = game._act(  # noqa: SLF001
+        game._by_id["p1"],  # noqa: SLF001
+        ActionRequest(ActionKind.SPEAK, "发言", requires_text=True),
+    )
+
+    assert response.text == "我独立核对到3号误引了10号原话，因此今天优先投3号。"
+    assert "过度相似" in controller.requests[1].retry_feedback
+    assert game._controller_metrics.failure_breakdown == {  # noqa: SLF001
+        "speak/copied public speech": 1,
+    }
+
+
+def test_hidden_werewolf_self_admission_in_last_words_is_retried() -> None:
+    """Death without role flips must not let a wolf confirm hidden information."""
+    controller = RecordingController(
+        [
+            AgentResponse(text="我确实是狼人，但请继续盯住3号。"),
+            AgentResponse(text="我不接受今天的票型，请重新核对3号的前后矛盾。"),
+        ],
+    )
+    game = Game(
+        llm_seat_config(controller_retries=1, strict_controllers=True),
+        controllers={"p1": controller},
+        terminal=SilentTerminal(),
+    )
+
+    response = game._act(  # noqa: SLF001
+        game._by_id["p1"],  # noqa: SLF001
+        ActionRequest(ActionKind.LAST_WORDS, "遗言", requires_text=True),
+    )
+
+    assert response.text == "我不接受今天的票型，请重新核对3号的前后矛盾。"
+    assert "死亡不翻牌" in controller.requests[1].retry_feedback
+    assert game._controller_metrics.failure_breakdown == {  # noqa: SLF001
+        "last_words/revealed hidden role": 1,
+    }
+
+
 def test_output_limit_retry_tells_model_to_shorten_its_answer() -> None:
     """A cut-off provider response should get actionable retry feedback."""
 

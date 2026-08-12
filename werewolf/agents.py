@@ -2134,6 +2134,7 @@ class LLMController:
                     "skills": [
                         {
                             "name": skill.name,
+                            "version": skill.version,
                             "description": skill.description,
                             "instructions": skill.instructions,
                         }
