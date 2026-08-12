@@ -15,6 +15,7 @@ from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
+from difflib import SequenceMatcher
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -62,13 +63,15 @@ from .skills import (
     add_preset_skill,
     add_social_board_skill,
     apply_mode_role_skill,
+    apply_skill_overrides,
     resolve_player_skills,
 )
+from .training import TrajectoryRecorder, claims_own_role
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
-    from .config import GameConfig, PlayerConfig
+    from .config import GameConfig, PlayerConfig, SkillOverrideConfig
 
 
 class DeathCause(str, Enum):
@@ -99,6 +102,8 @@ class GameResult:
     controller_retries: int
     controller_fallbacks: int
     seat_labels: tuple[tuple[str, str], ...]
+    trajectory_path: str | None
+    trajectory_match_id: str | None
 
 
 @dataclass
@@ -347,6 +352,11 @@ class Game:
         self._checkpoint_base_payload: dict[str, object] | None = None
         self._action_journal: list[dict[str, object]] = []
         self._action_cursor = 0
+        self._trajectory_recorder = (
+            TrajectoryRecorder(config.training_trajectory_path)
+            if config.training_trajectory_path is not None
+            else None
+        )
         self._started_at = time.monotonic()
         self._controller_metrics = ControllerMetrics()
         self._state_lock = threading.RLock()
@@ -391,7 +401,11 @@ class Game:
                 seat.persona,
                 controllers or {},
             )
-            skills = self._build_player_skills(role, seat.skills)
+            skills = self._build_player_skills(
+                role,
+                seat.skills,
+                seat.skill_overrides,
+            )
             self._controller_kinds[player_id] = seat.controller
             self.players.append(
                 PlayerState(
@@ -468,9 +482,27 @@ class Game:
                     "provider_trust": self._provider_trust_signature(seat.provider),
                     "persona": seat.persona,
                     "skills": list(seat.skills),
+                    **(
+                        {
+                            "skill_overrides": [
+                                asdict(override) for override in seat.skill_overrides
+                            ],
+                        }
+                        if seat.skill_overrides
+                        else {}
+                    ),
                 }
                 for seat in self.config.players
             ],
+            **(
+                {
+                    "training_trajectory_path": str(
+                        Path(self.config.training_trajectory_path).resolve(),
+                    ),
+                }
+                if self.config.training_trajectory_path is not None
+                else {}
+            ),
         }
 
     def _provider_trust_signature(
@@ -562,16 +594,23 @@ class Game:
                 for player in self.players
             ],
             "action_journal": [],
+            "training_trajectory": (
+                self._trajectory_recorder.checkpoint_value()
+                if self._trajectory_recorder is not None
+                else None
+            ),
         }
 
     def _save_checkpoint(self, *, next_day: int, next_step: str) -> None:
         """Start a recoverable phase and clear its completed-action journal."""
+        if self._trajectory_recorder is not None:
+            self._trajectory_recorder.advance_stage()
+        self._action_journal = []
+        self._action_cursor = 0
         if self._checkpoint_path is None:
             return
         payload = self._checkpoint_payload(next_day=next_day, next_step=next_step)
         self._checkpoint_base_payload = payload
-        self._action_journal = []
-        self._action_cursor = 0
         self._write_checkpoint(payload)
 
     def _write_checkpoint(self, payload: dict[str, object]) -> None:
@@ -666,6 +705,7 @@ class Game:
             player.skills = self._build_player_skills(
                 player.role,
                 self._seat_configs[index].skills,
+                self._seat_configs[index].skill_overrides,
                 lover=player.lover_id is not None,
             )
         self.boundary.continue_after(max_sequence)
@@ -769,6 +809,10 @@ class Game:
         self._action_journal = list(raw.get("action_journal", []))
         self._action_cursor = 0
         self._checkpoint_base_payload = raw
+        if self._trajectory_recorder is not None:
+            trajectory = raw.get("training_trajectory")
+            if trajectory is not None:
+                self._trajectory_recorder.restore(trajectory)
         if self.config.spectator_progress:
             self.terminal.progress(
                 self._t(
@@ -781,6 +825,7 @@ class Game:
         self,
         role: Role,
         configured: tuple[str, ...],
+        overrides: tuple[SkillOverrideConfig, ...] = (),
         *,
         lover: bool = False,
     ) -> tuple[Skill, ...]:
@@ -805,7 +850,24 @@ class Game:
             and self._resolved_role_counts == Counter(preset_deck)
         ):
             skills = add_preset_skill(skills, self.config.role_preset)
-        return add_lover_skill(skills) if lover else skills
+        skills = add_lover_skill(skills) if lover else skills
+        return apply_skill_overrides(skills, overrides)
+
+    def _seat_policy(self, player: PlayerState) -> dict[str, str | None]:
+        """Return non-secret controller metadata for one randomized seat."""
+        seat = self._seat_configs[player.seat_number - 1]
+        provider = seat.provider
+        model = (
+            self.config.providers[provider].model
+            if provider is not None and provider in self.config.providers
+            else None
+        )
+        return {
+            "controller": seat.controller,
+            "provider": provider,
+            "model": model,
+            "persona": seat.persona,
+        }
 
     def _clear_checkpoint(self) -> None:
         """Remove a checkpoint after the match reaches a terminal result."""
@@ -1370,8 +1432,14 @@ class Game:
         second = self._by_id[second_id]
         first.lover_id = second.player_id
         second.lover_id = first.player_id
-        first.skills = add_lover_skill(first.skills)
-        second.skills = add_lover_skill(second.skills)
+        for lover in (first, second):
+            seat = self._seat_configs[lover.seat_number - 1]
+            lover.skills = self._build_player_skills(
+                lover.role,
+                seat.skills,
+                seat.skill_overrides,
+                lover=True,
+            )
         lover_names = self._t(
             f"{self._player_label(first)}、{self._player_label(second)}",
             f"{self._player_label(first)} and {self._player_label(second)}",
@@ -2545,6 +2613,22 @@ class Game:
         private_result_text: str = "",
     ) -> dict[str, object]:
         """Persist one successful controller response before applying its effects."""
+        if self._trajectory_recorder is not None:
+            policy = self._seat_policy(player)
+            logical_action_index = (
+                self._action_cursor if action_index is None else action_index
+            )
+            self._trajectory_recorder.record(
+                self._view(player),
+                request,
+                response,
+                controller=str(policy["controller"] or ""),
+                provider=policy["provider"],
+                model=policy["model"],
+                persona=str(policy["persona"] or ""),
+                action_index=logical_action_index,
+                private_result=private_result_text,
+            )
         entry = {
             **self._action_signature(player, request),
             "action_index": self._action_cursor
@@ -2581,6 +2665,11 @@ class Game:
             "fallback_records": [asdict(item) for item in self._fallback_records],
             "last_nonterminal_snapshot": self._last_nonterminal_snapshot,
             "elapsed_seconds": time.monotonic() - self._started_at,
+            "training_trajectory": (
+                self._trajectory_recorder.checkpoint_value()
+                if self._trajectory_recorder is not None
+                else None
+            ),
         }
         self._checkpoint_base_payload = payload
         self._write_checkpoint(payload)
@@ -2687,7 +2776,12 @@ class Game:
                     raise RuntimeError(msg) from exc
                 return self._safe_fallback(player, request, last_error, attempt + 1)
 
-            reason = self._rejection_reason(request, response, is_llm=is_llm)
+            reason = self._rejection_reason(
+                player,
+                request,
+                response,
+                is_llm=is_llm,
+            )
             if not reason:
                 return self._sanitize_response(
                     replace(response, attempts=attempt + 1),
@@ -2718,6 +2812,7 @@ class Game:
 
     def _rejection_reason(
         self,
+        player: PlayerState,
         request: ActionRequest,
         response: AgentResponse,
         *,
@@ -2740,13 +2835,69 @@ class Game:
             return f"illegal choice {response.choice!r} for {request.kind.value}"
         if is_llm and request.requires_text:
             text = response.text.strip()
-            if not text:
-                return f"empty text for {request.kind.value}"
-            if re.fullmatch(r"(?:\.{2,}|…+|。+)", text):
-                return f"placeholder text for {request.kind.value}"
-            if self._looks_like_truncated_text(text):
-                return f"incomplete text for {request.kind.value}"
+            text_reason = self._text_rejection_reason(player, request, text)
+            if text_reason:
+                return text_reason
         return ""
+
+    def _text_rejection_reason(
+        self,
+        player: PlayerState,
+        request: ActionRequest,
+        text: str,
+    ) -> str:
+        """Validate required model prose, including public originality."""
+        if not text:
+            return f"empty text for {request.kind.value}"
+        if re.fullmatch(r"(?:\.{2,}|…+|。+)", text):
+            return f"placeholder text for {request.kind.value}"
+        if self._looks_like_truncated_text(text):
+            return f"incomplete text for {request.kind.value}"
+        if (
+            request.kind is ActionKind.LAST_WORDS
+            and player.role is Role.WEREWOLF
+            and not self._reveals_roles_on_death()
+            and claims_own_role(
+                text,
+                localized(ROLE_NAMES, self.config.language)[Role.WEREWOLF],
+            )
+        ):
+            return f"revealed hidden role for {request.kind.value}"
+        if request.kind is ActionKind.SPEAK and self._copies_public_speech(
+            player, text
+        ):
+            return f"copied public speech for {request.kind.value}"
+        return ""
+
+    def _copies_public_speech(self, player: PlayerState, text: str) -> bool:
+        """Reject near-verbatim copying of an earlier same-day public speaker.
+
+        This checks only already-visible discussion lines from other players.
+        It does not compare private notes, team chat, judge announcements, or
+        prior days, so the retry cannot reveal information the actor lacks.
+        """
+        normalized = self._normalized_public_speech(text)
+        if len(normalized) < 60:
+            return False
+        current_label = self._player_label(player)
+        for event in reversed(player.memory.events):
+            if event.day != self.day or event.phase != "discussion":
+                continue
+            if event.visibility is not Visibility.PUBLIC or event.sender is None:
+                continue
+            if event.sender == current_label:
+                continue
+            prior = self._normalized_public_speech(event.text)
+            if len(prior) < 60:
+                continue
+            if SequenceMatcher(None, normalized, prior).ratio() >= 0.86:
+                return True
+        return False
+
+    @staticmethod
+    def _normalized_public_speech(text: str) -> str:
+        """Remove sender framing and punctuation before duplicate comparison."""
+        return "".join(character for character in text if character.isalpha())
 
     @staticmethod
     def _looks_like_truncated_text(text: str) -> bool:
@@ -2808,6 +2959,35 @@ class Game:
                 "Your previous text appears to end mid-sentence. Shorten it and "
                 "finish the statement with complete sentence-ending punctuation.",
             )
+        special_feedback: tuple[str, str] | None = None
+        if reason.startswith("copied public speech"):
+            special_feedback = (
+                (
+                    "上一次公开发言与本日已有发言过度相似。请不要复述前位玩家的结构、排序或整段措辞；"
+                    "只保留你独立核对出的具体新事实，并说明它如何改变你的投票判断。"
+                ),
+                (
+                    "Your previous public statement was too similar to an earlier "
+                    "speaker today. Do not repeat their structure, ranking, or "
+                    "phrasing. Keep only a concrete fact you independently verified "
+                    "and explain how it changes your vote."
+                ),
+            )
+        elif reason.startswith("revealed hidden role"):
+            special_feedback = (
+                (
+                    "本局死亡不翻牌，上一次遗言公开承认了你的隐藏身份。请保持身份伪装，只引用公开事实"
+                    "留下反方叙事；不得确认阵营、队友或隐藏信息。"
+                ),
+                (
+                    "Roles are not revealed on death in this match, and your previous "
+                    "last words admitted your hidden role. Maintain your cover and "
+                    "use only public facts; do not confirm your faction, teammates, "
+                    "or hidden information."
+                ),
+            )
+        if special_feedback is not None:
+            return self._t(*special_feedback)
         abstain_rule = (
             self._t(
                 "确实要弃权时才把 choice 设为 null。",
@@ -2925,6 +3105,8 @@ class Game:
             "empty text": "missing required text",
             "placeholder text": "placeholder text",
             "incomplete text": "incomplete text",
+            "copied public speech": "copied public speech",
+            "revealed hidden role": "revealed hidden role",
         }
         for prefix, summary in safe_validation_errors.items():
             if lowered.startswith(prefix):
@@ -3630,6 +3812,27 @@ class Game:
             )
         if self.config.memory_directory:
             self.export_memories(self.config.memory_directory)
+        trajectory_match_id: str | None = None
+        if self._trajectory_recorder is not None:
+            self._trajectory_recorder.finish(
+                language=self.config.language,
+                role_preset=self.config.role_preset,
+                seed=self.config.seed,
+                rules=self.config.rules,
+                winner=winner,
+                winning_players=winning_players,
+                prize_shares=prize_shares,
+                days=self.day,
+                reason=reason,
+                duration_seconds=time.monotonic() - self._started_at,
+                players=self.players,
+                seat_policies={
+                    player.player_id: self._seat_policy(player)
+                    for player in self.players
+                },
+                controller_metrics=self._controller_metrics,
+            )
+            trajectory_match_id = self._trajectory_recorder.match_id
         self._clear_checkpoint()
         return GameResult(
             winner=winner,
@@ -3647,6 +3850,8 @@ class Game:
             seat_labels=tuple(
                 (player.name, self._player_label(player)) for player in self.players
             ),
+            trajectory_path=self.config.training_trajectory_path,
+            trajectory_match_id=trajectory_match_id,
         )
 
     def _controller_reliability_text(self) -> str:

@@ -9,6 +9,8 @@ from .models import Role, Skill
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from .config import SkillOverrideConfig
+
 GLOBAL_SKILLS: tuple[Skill, ...] = (
     Skill(
         name="global_gamecraft",
@@ -24,26 +26,113 @@ GLOBAL_SKILLS: tuple[Skill, ...] = (
     ),
 )
 
+# Promoted after 20 cumulative DeepSeek self-play episodes. The content remains
+# inspectable here while the version lets future trajectories compare it with
+# later candidates without relying on a mutable label.
+SELFPLAY_V20_VERSION = "selfplay-v20-ee31f47c"
+
+
+def _promoted_selfplay_v20_skill(
+    *,
+    name: str,
+    description: str,
+    base_instructions: str,
+    rules: tuple[str, ...],
+) -> Skill:
+    """Build the exact v20 candidate text that was evaluated in self-play."""
+    instructions = (
+        base_instructions.rstrip()
+        + f"\n\n【自博弈强化候选 {SELFPLAY_V20_VERSION}】"
+        + "".join(f"\n- {rule}" for rule in rules)
+    )
+    return Skill(
+        name=name,
+        description=f"{description}（自博弈强化候选）",
+        instructions=instructions,
+        version=SELFPLAY_V20_VERSION,
+    )
+
+
 ROLE_SKILLS: dict[Role, Skill] = {
-    Role.VILLAGER: Skill(
+    Role.VILLAGER: _promoted_selfplay_v20_skill(
         name="role_villager",
         description="平民职责",
-        instructions=(
+        base_instructions=(
             "你没有法官提供的额外身份信息。优先保护可靠的公开信息链，逐人核验发言排序与最终票型；"
             "投票前明确首选与备选，并检查自己是否只是在跟随多数。不要伪造角色能力，也不要因某人"
             "被夜袭、被多人怀疑或发言简短就直接认定身份。若他人的查杀与你的真实平民身份冲突，"
             "你可以在个人视角确认其结果为假，但必须再用公开时间线、票型和关系链说服其他玩家。"
         ),
+        rules=(
+            (
+                "引用关系链、票型或他人排序前，逐项核对法官公开记录中的座位、轮次、原始顺序与实际票向；"
+                "相同目标集合不等于相同排序，夜间死亡也不会自动证明死者的判断。"
+            ),
+            (
+                "最迟从第二个白天开始给出明确首选和备选；信息不足可以降低置信度并保留反方解释，但不能用"
+                "连续弃权代替判断，关键轮次投票必须与公开排序一致。"
+            ),
+            (
+                "连续两轮投同一目标前，列出自上轮以来新增的独立证据；若只有旧叙事被重复传播，必须重新"
+                "开放至少两个候选，防止锚定效应被狼人利用。"
+            ),
+            (
+                "四人局或错误放逐即可能终局时，先做存活狼人数量约束，再逐个比较候选的历史票向、错误的"
+                "受益者和当前投票收益；主动核对前位玩家的事实错误，不能因多人复述就提升其可信度。"
+            ),
+            (
+                "形成决策后用简洁、完整的动作字段提交结果，避免冗长推演挤占最终答案；重试不会提供新的"
+                "游戏证据，不得借重试改变已无新信息支持的选择。"
+            ),
+            (
+                "策略清单只用于私下检查，不要把“可核验依据、首选备选、反方解释”等提示词原样复述成公开"
+                "模板；每轮只引用本局新出现的一至两条具体事实，并明确它们相对上一轮改变了什么判断。"
+            ),
+            (
+                "有人公开声明神职且当场无人对跳时，不能仅以“身份无法核验”为由将其放逐；先核对其公开"
+                "信息是否与规则和时间线一致，再比较误出真神与暂留待验的终局代价。"
+            ),
+        ),
     ),
-    Role.WEREWOLF: Skill(
+    Role.WEREWOLF: _promoted_selfplay_v20_skill(
         name="role_werewolf",
         description="狼人团队策略",
-        instructions=(
+        base_instructions=(
             "夜间与队友明确袭击优先级、白天站位和必要的身份声明计划；优先处理已确认或高可信的"
             "信息角色与好人核心。队友不应输出相同措辞、完全相同的嫌疑排序或机械统一票型。根据"
             "公开证据决定保护、切割或保持距离，不要无依据强保队友，也绝不能泄露队友名单或狼聊。"
             "连续多轮共同救援或同票会形成比单轮倒钩更强的关系链；狂人误发队友查杀时，先评估切割"
             "是否能保住其余狼人，不要为救一名队友让整组票型同时暴露。"
+        ),
+        rules=(
+            (
+                "引用关系链、票型或他人排序前，逐项核对法官公开记录中的座位、轮次、原始顺序与实际票向；"
+                "相同目标集合不等于相同排序，夜间死亡也不会自动证明死者的判断。"
+            ),
+            (
+                "被放逐后的遗言仍是公开策略：除非规则已经公开身份，绝不能承认狼人身份、确认队友、验证"
+                "预言家的隐藏信息或宣布狼队团灭；只使用公开事实留下能保护存活队友的反方叙事。"
+            ),
+            (
+                "队友成为多数票焦点且强保会暴露关系链时，允许一名狼人按其公开逻辑切割；其余队友不要"
+                "机械同票或复述同一理由，要优先保留一名关系较浅、能进入终局的狼人。"
+            ),
+            (
+                "夜间袭击优先打断已经公开或高度可信的信息链；同时比较药物、开枪等反制风险，以及目标"
+                "死亡后能否支持次日叙事，不能只按角色价值机械下刀。"
+            ),
+            (
+                "共同制造一次关键票型后，下一轮必须在私聊中分配不同的公开立场、怀疑目标和投票角色；"
+                "每名狼人独立核对公开事实，避免整队复制同一个事实错误。"
+            ),
+            (
+                "形成决策后用简洁、完整的动作字段提交结果，避免冗长推演挤占最终答案；重试不会提供新的"
+                "游戏证据，不得借重试改变已无新信息支持的选择。"
+            ),
+            (
+                "策略清单只用于私下检查，不要把“可核验依据、首选备选、反方解释”等提示词原样复述成公开"
+                "模板；每轮只引用本局新出现的一至两条具体事实，并明确它们相对上一轮改变了什么判断。"
+            ),
         ),
     ),
     Role.POLICE: Skill(
@@ -55,33 +144,127 @@ ROLE_SKILLS: dict[Role, Skill] = {
             "警队即将被屠光或错误归票将决定胜负时，应及时给出完整结果链；不要泄露警聊原文。"
         ),
     ),
-    Role.SEER: Skill(
+    Role.SEER: _promoted_selfplay_v20_skill(
         name="role_seer",
         description="预言家信息管理",
-        instructions=(
+        base_instructions=(
             "维护准确的查验表，只能公布法官真实给出的结果。决定起跳时同时说明历次验人、结果和"
             "下一晚查验方向，使好人在你夜间死亡且无法留遗言时仍能使用信息。不要用发言表现包装"
             "查验结果，也不要把好人阵营查验解释成具体神职。起跳收益取决于牌组：查杀、即将被"
             "放逐或能阻止关键误投时应及时公开；只有低区分度村人侧结果、且公开会让少数村人阵营"
             "同时暴露时，应优先隐藏并继续寻找狼人。公开后必须让出票、下轮查验和实际行动相互接续。"
         ),
+        rules=(
+            (
+                "首夜只有村人侧结果、无人对跳且自己尚未进入明确放逐位时，默认继续隐藏；起跳前必须"
+                "比较暴露后被刀风险与当前查验对票型的实际区分度。"
+            ),
+            (
+                "一旦公开预言家身份，必须给出基于查验和公开记录的首选、备选与当轮票向；不要在投入"
+                "身份信用后弃权，否则信息链无法转化为保护或放逐收益。"
+            ),
+            (
+                "查验只确认阵营显示；他人的女巫、守卫或刀口声明仍是待核验信息，不能与村人侧结果相加成"
+                "所谓双重身份确认。"
+            ),
+            (
+                "形成决策后用简洁、完整的动作字段提交结果，避免冗长推演挤占最终答案；重试不会提供新的"
+                "游戏证据，不得借重试改变已无新信息支持的选择。"
+            ),
+            (
+                "策略清单只用于私下检查，不要把“可核验依据、首选备选、反方解释”等提示词原样复述成公开"
+                "模板；每轮只引用本局新出现的一至两条具体事实，并明确它们相对上一轮改变了什么判断。"
+            ),
+            (
+                "拿到狼人侧查验后，下一次白天发言默认立即公开身份、目标和真实结果，并把票投向查杀；"
+                "只有能说明更高即时收益的极少数局面才继续隐藏，不能用编造的行为理由代替法官查验。"
+            ),
+            (
+                "不要重复查验同一名仍存活的玩家：法官阵营结果不会因复验增强，复验只会浪费扩展信息面的"
+                "夜晚；记录已有结果并把下一验用于未验候选。"
+            ),
+            (
+                "有人公开声明神职且当场无人对跳时，不能仅以“身份无法核验”为由将其放逐；先核对其公开"
+                "信息是否与规则和时间线一致，再比较误出真神与暂留待验的终局代价。"
+            ),
+        ),
     ),
-    Role.WITCH: Skill(
+    Role.WITCH: _promoted_selfplay_v20_skill(
         name="role_witch",
         description="女巫资源与身份管理",
-        instructions=(
+        base_instructions=(
             "准确记录解药、毒药和法官告知的袭击目标，分别评估救人、追轮次与误毒风险。刀口只能"
             "提高好人概率，不能当作查验金水。如果白天已进入高概率放逐位，应在投票前及时、准确地"
             "声明身份、药物状态和可公开的夜间信息，不要把关键身份信息拖到遗言才说。"
         ),
+        rules=(
+            (
+                "首夜救人只提高刀口为好人的概率，不足以单独支持首日公开。若选择公开，必须先明确公开"
+                "能改变的当前票型、需要保护的信息链和自己的当轮首选，不能只报药物状态后弃权。"
+            ),
+            (
+                "当可信信息角色已经出局、自己又已公开暴露时，毒药窗口价值会快速上升；在存在至少两条"
+                "独立公开证据的目标时，明确比较当夜使用与继续保留的胜率代价，而不是默认不用药。"
+            ),
+            (
+                "策略清单只用于私下检查，不要把“可核验依据、首选备选、反方解释”等提示词原样复述成公开"
+                "模板；每轮只引用本局新出现的一至两条具体事实，并明确它们相对上一轮改变了什么判断。"
+            ),
+            (
+                "公开女巫后若自己进入放逐焦点，优先完成生存辩护：要求潜在对跳当场给出药物与刀口时间线，"
+                "解释自身行动的可验证边界，并明确投向最矛盾者；不要继续围绕被救者制造无关焦点。"
+            ),
+            (
+                "有人公开声明神职且当场无人对跳时，不能仅以“身份无法核验”为由将其放逐；先核对其公开"
+                "信息是否与规则和时间线一致，再比较误出真神与暂留待验的终局代价。"
+            ),
+            (
+                "形成决策后用简洁、完整的动作字段提交结果，避免冗长推演挤占最终答案；重试不会提供新的"
+                "游戏证据，不得借重试改变已无新信息支持的选择。"
+            ),
+        ),
     ),
-    Role.HUNTER: Skill(
+    Role.HUNTER: _promoted_selfplay_v20_skill(
         name="role_hunter",
         description="猎人开枪纪律",
-        instructions=(
+        base_instructions=(
             "通常隐藏身份以保留威慑。死亡后开枪前重新评估证据强度、票型是否被共识裹挟以及目标"
             "是否只是发言不完整；没有足够独立证据时，选择不开枪优于带走高概率好人。公开身份时"
             "说明开枪或不开枪的可核验依据，不把遗言中的猜测表述成法官确认。"
+        ),
+        rules=(
+            (
+                "死亡开枪前先计算剩余狼人上限、不开枪后好人的容错轮次，以及目标是否有两条独立证据；"
+                "有可靠候选且不开枪会直接丢失追轮次时应开枪，证据仍单一或互相矛盾时才保留不开枪。"
+            ),
+            (
+                "公开身份或遗言不能只用于自证；应把枪口条件写成可执行规则，让存活好人知道哪些新信息会"
+                "使你改变首选，避免枪威慑与白天票型脱节。"
+            ),
+            (
+                "策略清单只用于私下检查，不要把“可核验依据、首选备选、反方解释”等提示词原样复述成公开"
+                "模板；每轮只引用本局新出现的一至两条具体事实，并明确它们相对上一轮改变了什么判断。"
+            ),
+            (
+                "有人公开声明神职且当场无人对跳时，不能仅以“身份无法核验”为由将其放逐；先核对其公开"
+                "信息是否与规则和时间线一致，再比较误出真神与暂留待验的终局代价。"
+            ),
+            (
+                "普通讨论中不要把私密底牌或“准备继续隐藏”的计划写进公开发言；提交前检查文本是否出现"
+                "自己的真实角色名。只有进入明确放逐位、对跳能改变票型或开枪规则必须说明时才公开。"
+            ),
+            (
+                "发言内容与私密计划必须一致：若计划是隐藏，就删除所有直接或间接的猎人自报；若决定公开，"
+                "则同时说明可核验依据、枪口条件和公开能改变的当轮票型。"
+            ),
+            (
+                "当唯一公开神职面临放逐且无人对跳时，不要用弃权回避身份判断；必须比较暂留待验与误出"
+                "真神的代价，并用实际票型保护更高信息价值的一方。"
+            ),
+            (
+                "形成决策后用简洁、完整的动作字段提交结果，避免冗长推演挤占最终答案；重试不会提供新的"
+                "游戏证据，不得借重试改变已无新信息支持的选择。"
+            ),
         ),
     ),
     Role.MEDIUM: Skill(
@@ -453,6 +636,31 @@ def add_social_board_skill(
     if any(item.name == skill.name for item in skills):
         return skills
     return (*skills, skill)
+
+
+def apply_skill_overrides(
+    skills: tuple[Skill, ...],
+    overrides: tuple[SkillOverrideConfig, ...],
+) -> tuple[Skill, ...]:
+    """Replace active prompt guidance with versioned experimental variants.
+
+    An override is intentionally dormant when its named skill is not active for
+    the current role or board. This makes randomized arena populations safe:
+    a seat can carry a Seer candidate without injecting Seer knowledge when it
+    draws another role.
+    """
+    by_name = {override.name: override for override in overrides}
+    return tuple(
+        Skill(
+            name=skill.name,
+            description=override.description or skill.description,
+            instructions=override.instructions,
+            version=override.version,
+        )
+        if (override := by_name.get(skill.name)) is not None
+        else skill
+        for skill in skills
+    )
 
 
 def add_preset_skill(

@@ -218,11 +218,17 @@ class PlayerMemory:
 
 @dataclass(frozen=True)
 class Skill:
-    """Reusable behavioral guidance supplied only to one controller."""
+    """Reusable, versioned behavioral guidance supplied to one controller.
+
+    ``version`` is descriptive metadata rather than a source of trust. Training
+    exports also fingerprint the complete content so two prompts cannot be
+    accidentally grouped merely because they reuse the same version label.
+    """
 
     name: str
     description: str
     instructions: str
+    version: str = "builtin-v1"
 
 
 @dataclass

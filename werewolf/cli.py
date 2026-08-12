@@ -8,16 +8,55 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+from .agents import Terminal
 from .config import (
     ROLE_PRESET_SIZES,
     GameConfig,
     demo_config,
     load_config,
+    write_config,
     write_example_config,
 )
 from .engine import Game
 from .rendering import sanitize_rendered_text
+from .training import (
+    apply_skill_improvement_manifest,
+    build_skill_improvement_manifest,
+    load_skill_leaderboard,
+    write_skill_improvement_manifest,
+)
 from .tui import run_config_tui
+
+
+class _ArenaTerminal(Terminal):
+    """Suppress per-turn rendering while a batch arena collects trajectories."""
+
+    def __init__(self) -> None:
+        super().__init__(clear_screen=False)
+
+    def announce(self, _text: str) -> None:
+        """Discard public game narration; the judge still records observations."""
+
+    def progress(self, _text: str) -> None:
+        """Discard durable spectator progress during batch execution."""
+
+    def metric(self, _text: str, *, label: str = "统计") -> None:
+        """Discard per-match metrics; the arena prints aggregate results."""
+
+    def notice(self, _text: str, *, label: str = "提示") -> None:
+        """Discard repeated preflight notices in a validated batch."""
+
+    def transient_progress(self, _text: str) -> None:
+        """Discard transient action status during batch execution."""
+
+    def say(
+        self,
+        _player_name: str,
+        _text: str,
+        *,
+        fallback_label: str | None = None,
+    ) -> None:
+        """Discard public speech rendering without altering boundary delivery."""
 
 
 def _print_resume_hint(active_checkpoint: str | None, config_path: str) -> None:
@@ -48,6 +87,38 @@ def _validate_play_modes(resume_checkpoint: str | None, force_new: bool) -> None
     if resume_checkpoint and force_new:
         msg = "--resume 与 --force-new 不能同时使用"
         raise ValueError(msg)
+
+
+def _validate_arena_config(config: GameConfig, games: int) -> None:
+    """Reject batch configurations that cannot run without interaction."""
+    if games < 1:
+        msg = "--games must be positive"
+        raise ValueError(msg)
+    if any(player.controller == "human" for player in config.players):
+        msg = "Arena configurations cannot contain human controllers"
+        raise ValueError(msg)
+
+
+def _validate_improvement_outputs(
+    output_config: str,
+    manifest: str,
+    *,
+    force: bool,
+) -> tuple[Path, Path]:
+    """Resolve both generated files before any user data can be replaced."""
+    output_path = Path(output_config)
+    manifest_path = Path(manifest)
+    if output_path.resolve() == manifest_path.resolve():
+        msg = "Candidate config and manifest must use different paths"
+        raise ValueError(msg)
+    if not force:
+        if output_path.exists():
+            msg = f"Configuration already exists: {output_path}"
+            raise FileExistsError(msg)
+        if manifest_path.exists():
+            msg = f"Skill improvement manifest already exists: {manifest_path}"
+            raise FileExistsError(msg)
+    return output_path, manifest_path
 
 
 def _validate_provider_credentials(config: GameConfig) -> None:
@@ -205,6 +276,94 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="禁用互不可见的 LLM 公开投票并发请求",
     )
+    play_parser.add_argument(
+        "--trajectory",
+        help="将含个人视角、动作和终局奖励的私密训练轨迹追加到 JSONL 文件",
+    )
+
+    leaderboard_parser = subparsers.add_parser(
+        "leaderboard",
+        help="从训练轨迹统计精确 skill 版本的胜率和平均回报",
+    )
+    leaderboard_parser.add_argument("trajectory_path", help="训练轨迹 JSONL 文件")
+    leaderboard_parser.add_argument(
+        "--skill",
+        help="只比较指定 skill 名称，例如 role_seer",
+    )
+    leaderboard_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="输出机器可读 JSON",
+    )
+    leaderboard_parser.add_argument(
+        "--selection",
+        choices=("mean", "ucb"),
+        default="mean",
+        help="按平均回报利用，或按 UCB 为低样本候选保留探索机会",
+    )
+
+    improve_parser = subparsers.add_parser(
+        "improve-skills",
+        aliases=["train-skills"],
+        help="从奖励轨迹生成版本化 role skill 候选并写入新配置",
+    )
+    improve_parser.add_argument("trajectory_path", help="私密训练轨迹 JSONL 文件")
+    improve_parser.add_argument("config_path", help="要附加候选 skill 的基础配置")
+    improve_parser.add_argument(
+        "--output-config",
+        required=True,
+        help="写入候选 skill_overrides 的新配置路径",
+    )
+    improve_parser.add_argument(
+        "--manifest",
+        required=True,
+        help="保存候选来源、指标、指纹与完整内容的私密 JSON 清单",
+    )
+    improve_parser.add_argument(
+        "--skill",
+        action="append",
+        dest="skills",
+        help="只更新指定 skill；可重复，例如 role_seer、role_werewolf",
+    )
+    improve_parser.add_argument(
+        "--version-prefix",
+        default="selfplay-v1",
+        help="候选版本前缀；默认 selfplay-v1",
+    )
+    improve_parser.add_argument(
+        "--selection",
+        choices=("mean", "ucb"),
+        default="mean",
+        help="按平均回报选择源版本，或用 UCB 继续探索低样本版本",
+    )
+    improve_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="覆盖已存在的候选配置和 manifest",
+    )
+
+    arena_parser = subparsers.add_parser(
+        "arena",
+        help="用连续随机种子批量运行无真人自博弈并写入训练轨迹",
+    )
+    arena_parser.add_argument("config_path", help="竞技场 JSON 配置")
+    arena_parser.add_argument(
+        "--games",
+        type=int,
+        default=10,
+        help="批量运行的对局数；默认 10",
+    )
+    arena_parser.add_argument(
+        "--seed-start",
+        type=int,
+        default=0,
+        help="第一局使用的随机种子；后续逐局加一",
+    )
+    arena_parser.add_argument(
+        "--trajectory",
+        required=True,
+        help="追加所有私密训练轨迹的 JSONL 文件",
+    )
 
     demo_parser = subparsers.add_parser("demo", help="运行无需 API 的本地机器人演示")
     demo_parser.add_argument("--players", type=int, choices=range(6, 17))
@@ -220,7 +379,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> None:  # noqa: PLR0911
     """Execute a CLI subcommand and provide concise terminal errors."""
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -238,6 +397,128 @@ def main(argv: list[str] | None = None) -> None:
     config = None
     in_configurator = False
     try:
+        if args.command == "leaderboard":
+            rows = load_skill_leaderboard(
+                args.trajectory_path,
+                skill_name=args.skill,
+                selection=args.selection,
+            )
+            if args.json:
+                print(json.dumps(rows, ensure_ascii=False, sort_keys=True))
+            elif not rows:
+                print("没有找到符合条件的 skill 轨迹。")
+            else:
+                print(
+                    "skill\tversion\tfingerprint\tsamples\twin\tsurvival\treturn\tucb",
+                )
+                for row in rows:
+                    print(
+                        f"{row['name']}\t{row['version']}\t{row['fingerprint']}\t"
+                        f"{row['samples']}\t{row['win_rate']:.3f}\t"
+                        f"{row['survival_rate']:.3f}\t{row['mean_return']:.3f}\t"
+                        f"{row['ucb_score']:.3f}",
+                    )
+            return
+        if args.command in {"improve-skills", "train-skills"}:
+            output_path, manifest_path = _validate_improvement_outputs(
+                args.output_config,
+                args.manifest,
+                force=args.force,
+            )
+            manifest = build_skill_improvement_manifest(
+                args.trajectory_path,
+                skill_names=args.skills,
+                version_prefix=args.version_prefix,
+                selection=args.selection,
+            )
+            base_config = load_config(Path(args.config_path))
+            improved_config = apply_skill_improvement_manifest(base_config, manifest)
+            # Write the runtime config first. If it cannot be replaced, an
+            # existing private manifest remains untouched even under --force.
+            write_config(
+                improved_config,
+                output_path,
+                overwrite=args.force,
+            )
+            try:
+                write_skill_improvement_manifest(
+                    manifest,
+                    manifest_path,
+                    overwrite=args.force,
+                )
+            except BaseException:
+                # Without --force both destinations were proven absent, so
+                # removing the newly created config restores the original state.
+                if not args.force:
+                    output_path.unlink(missing_ok=True)
+                raise
+            print(
+                json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "name": candidate["name"],
+                                "version": candidate["version"],
+                                "fingerprint": candidate["fingerprint"],
+                                "samples": candidate["samples"],
+                                "mean_return": candidate["mean_return"],
+                            }
+                            for candidate in manifest["candidates"]
+                        ],
+                        "corpus_fingerprint": manifest["corpus_fingerprint"],
+                        "episode_count": manifest["episode_count"],
+                        "manifest": str(manifest_path.resolve()),
+                        "output_config": str(output_path.resolve()),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+            return
+        if args.command == "arena":
+            config_path = args.config_path
+            arena_config = load_config(Path(config_path))
+            _validate_arena_config(arena_config, args.games)
+            _validate_provider_credentials(arena_config)
+            wins: dict[str, int] = {}
+            fallbacks = 0
+            for offset in range(args.games):
+                seed = args.seed_start + offset
+                game_config = replace(
+                    arena_config,
+                    seed=seed,
+                    clear_screen=False,
+                    memory_directory=None,
+                    public_transcript_path=None,
+                    checkpoint_path=None,
+                    spectator_progress=False,
+                    training_trajectory_path=args.trajectory,
+                )
+                result = Game(
+                    game_config,
+                    terminal=_ArenaTerminal(),
+                ).run()
+                winner = result.winner.value if result.winner is not None else "draw"
+                wins[winner] = wins.get(winner, 0) + 1
+                fallbacks += result.controller_fallbacks
+                print(
+                    f"arena {offset + 1}/{args.games}: seed={seed} "
+                    f"winner={winner} days={result.days}",
+                )
+            print(
+                json.dumps(
+                    {
+                        "games": args.games,
+                        "seed_start": args.seed_start,
+                        "wins": wins,
+                        "controller_fallbacks": fallbacks,
+                        "trajectory_path": args.trajectory,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+            return
         if args.command in {"configure", "config", "setup"}:
             in_configurator = True
             tui_result = run_config_tui(
@@ -297,6 +578,11 @@ def main(argv: list[str] | None = None) -> None:
                 config = replace(config, confirm_critical_actions=False)
             if args.sequential_votes:
                 config = replace(config, parallel_llm_votes=False)
+            if args.trajectory:
+                config = replace(
+                    config,
+                    training_trajectory_path=args.trajectory,
+                )
             resume_checkpoint = args.resume
             _validate_play_modes(resume_checkpoint, args.force_new)
             active_checkpoint = resume_checkpoint or config.checkpoint_path
@@ -339,6 +625,8 @@ def main(argv: list[str] | None = None) -> None:
                         "controller_retries": result.controller_retries,
                         "controller_fallbacks": result.controller_fallbacks,
                         "seat_labels": seat_labels,
+                        "trajectory_path": result.trajectory_path,
+                        "trajectory_match_id": result.trajectory_match_id,
                     },
                     ensure_ascii=False,
                     sort_keys=True,

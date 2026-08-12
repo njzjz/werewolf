@@ -68,7 +68,7 @@ werewolf setup local.json --no-color
 
 不要把玩家命名为 `你`、`我` 等代词。模型会在座位表和历史中反复看到这些名称，容易误判指代；推荐使用 `真人玩家`、`主持人` 或其他明确专名。
 
-若不需要某项文件输出，可以显式设置 `"checkpoint_path": null`、`"public_transcript_path": null` 或 `"memory_directory": null`。全部字段及当前值可通过 `werewolf init --full` 查看。
+若不需要某项文件输出，可以显式设置 `"checkpoint_path": null`、`"public_transcript_path": null`、`"memory_directory": null` 或 `"training_trajectory_path": null`。全部字段及当前值可通过 `werewolf init --full` 查看。
 
 ## 身份牌组
 
@@ -144,6 +144,7 @@ werewolf setup local.json --no-color
 | `max_parallel_llm_requests` | 并行投票同时发出的模型请求上限；默认 2，降低 429 限流风险     |
 | `enable_tools`             | 是否允许 LLM 调用当前玩家范围内的只读证据工具；默认开启       |
 | `max_tool_rounds`          | 单个动作最多工具往返轮数；默认 2，可配置 1–8                  |
+| `training_trajectory_path` | 追加含个人视角、动作和终局奖励的私密 JSONL 训练轨迹           |
 
 ## 玩家控制器
 
@@ -151,7 +152,7 @@ werewolf setup local.json --no-color
 - `llm`：调用指定 provider；每次只发送该玩家已经获权的个人视图。
 - `bot`：不访问网络的简单本地机器人，用于演示和测试，不代表 LLM 水平。
 
-对象形式的玩家可以设置 `persona`、`skills`、`provider` 和 `fixed_role`。`persona` 进入该玩家的稳定系统提示。`skills` 可选择：
+对象形式的玩家可以设置 `persona`、`skills`、`provider`、`fixed_role` 和 `skill_overrides`。`persona` 进入该玩家的稳定系统提示。`skills` 可选择：
 
 - `logic`：追踪事实、声明、票型和矛盾。
 - `social`：观察站边、关系变化和表达方式。
@@ -159,6 +160,25 @@ werewolf setup local.json --no-color
 - `memory`：回顾历史并维护简短策略笔记。
 
 法官还会自动注入全局技能、真实身份技能、电影生存目标、恋人子身份技能以及适用的牌组专项技能。身份技能只进入对应玩家的私密上下文。
+
+`skill_overrides` 用于为某个座位携带实验策略。只有当同名 skill 在该玩家本局实际激活时才会替换，不会因随机抽到其他身份而泄露角色知识：
+
+```json
+{
+  "name": "预言家候选 A",
+  "controller": "llm",
+  "provider": "default",
+  "skill_overrides": [
+    {
+      "name": "role_seer",
+      "version": "candidate-a",
+      "instructions": "维护逐夜查验表；出现查杀或即将被放逐时，公开完整结果链。"
+    }
+  ]
+}
+```
+
+版本名用于人工阅读；训练统计还会对名称、版本、描述和完整指令计算内容指纹，防止同一版本名对应不同提示词时被错误合并。
 
 ## Provider 与流式传输
 
@@ -353,3 +373,48 @@ Unix/Linux/macOS 会自动启用 `readline`/`libedit`，支持中文按字符退
 - 恋人信息仅写入相关玩家自己的文件。
 
 记忆文件包含敏感个人视角。分享前应按玩家分别检查；可用 `werewolf play --no-memory` 或 `memory_directory: null` 关闭导出。
+
+## 自博弈训练轨迹
+
+单局采集可以使用配置字段或 CLI 覆盖：
+
+```bash
+werewolf play game.json --trajectory training/selfplay.jsonl
+```
+
+每个 JSONL 记录是一局完整 episode，包含每一步玩家实际获权的 `PlayerView`、合法动作空间、接受的响应、模型与 skill 内容指纹，以及终局后的胜负、存活、奖金和回报。终局奖励只写到该玩家最后一次动作；重试每次扣 `0.05`，安全后备另扣 `0.10`。电影模式奖金份额作为额外奖励。
+
+批量竞技场只接受没有真人控制器的配置，并使用连续种子运行：
+
+```bash
+werewolf arena arena.json --games 40 --seed-start 1000 \
+  --trajectory training/selfplay.jsonl
+```
+
+统计精确 skill 变体：
+
+```bash
+werewolf leaderboard training/selfplay.jsonl --skill role_seer
+werewolf leaderboard training/selfplay.jsonl --skill role_seer --selection ucb
+werewolf leaderboard training/selfplay.jsonl --skill role_seer --json
+```
+
+默认按平均回报排序，适合最终评估；`--selection ucb` 会给样本较少的候选加入探索加成，适合决定下一批竞技场应该继续测试哪些 skill。
+
+从奖励轨迹生成下一代 role skill 候选：
+
+```bash
+werewolf improve-skills training/selfplay.jsonl game.json \
+  --output-config training/game.candidate.json \
+  --manifest training/skill-candidates.json
+```
+
+默认处理轨迹中出现的全部 `role_*` skill。可重复使用 `--skill role_seer --skill role_werewolf` 只更新指定角色；`--selection mean` 选择当前平均回报最高的精确版本作为父代，`--selection ucb` 则保留低样本候选的探索机会。
+
+更新器不会直接改写内置 skill 或输入配置，而是生成新配置。候选会以同名 `skill_overrides` 附加到每个座位，抽到其他身份时保持休眠；manifest 保存父代版本、内容指纹、样本数、回报和不含玩家原文的结构化证据计数。当前信号覆盖真实神职被误投、预言家隐藏查杀或重复查验、公开模板复述、身份声明后弃权、狼人遗言自曝、狼人切割与夜袭等行为。后续用新配置运行 `arena`，再将基线与候选轨迹一起交给 `leaderboard`/`improve-skills`，即可形成可回退的迭代闭环。
+
+LLM 的公开发言还会经过同日去重校验。若新发言与前位玩家近乎逐字相同，法官会拒绝该回答并给出不含原文的重试反馈；该失败会进入控制器统计和训练轨迹。此校验只比较该玩家已经看到的本日公开发言，不读取任何私密频道。
+
+死亡不翻牌时，狼人遗言如果明确承认自己的狼人身份，也会被拒绝并重试，安全错误分类为 `last_words/revealed hidden role`。校验只使用该发言者的私密角色和自己的候选遗言，不检查其他玩家身份，也不会把隐藏信息写入反馈。
+
+轨迹、候选 manifest 和生成配置权限设为 `0600`。轨迹内容包含身份、私聊和个人思考，是比公开观战日志更敏感的离线训练数据；它不会进入任何玩家视图，也不应直接公开分享。

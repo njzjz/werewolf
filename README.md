@@ -203,6 +203,39 @@ Provider 字段、AI 证据工具、Prompt Caching、真人终端、观战、恢
 
 技能只指导决策，不能改变法官规则或赋予额外能力。
 
+## 自博弈 Skill 强化
+
+项目支持给座位配置版本化 `skill_overrides`，把某个自动 skill 替换为实验候选；候选只在对应角色或牌组实际激活时生效。使用同一模型、连续随机种子和轮换座位，可以把策略差异与模型差异分开评估。
+
+```bash
+# 单局追加私密训练轨迹
+werewolf play werewolf.json --trajectory training/selfplay.jsonl
+
+# 批量运行没有真人座位的竞技场
+werewolf arena arena.json --games 40 --seed-start 1000 \
+  --trajectory training/selfplay.jsonl
+
+# 比较预言家 skill 的精确版本与内容指纹
+werewolf leaderboard training/selfplay.jsonl --skill role_seer
+# 训练期也可按 UCB 选择值得继续探索的低样本候选
+werewolf leaderboard training/selfplay.jsonl --skill role_seer --selection ucb
+
+# 从奖励轨迹生成候选，并将其写入新的可回退配置
+werewolf improve-skills training/selfplay.jsonl werewolf.json \
+  --output-config training/werewolf.candidate.json \
+  --manifest training/skill-candidates.json
+```
+
+`improve-skills` 从精确版本的胜负回报和结构化动作中提取可审计信号，例如身份公开后的弃权、连续锚定、真实神职被误投、预言家重复查验或隐藏查杀、公开模板复述、狼人遗言自曝、狼人切割与高价值夜袭；它生成版本化候选和来源 manifest，并把候选作为所有座位的 dormant override 写入新配置。候选只有抽到对应角色时才激活，不会覆盖内置基线。下一轮用候选配置继续采集，再通过 `leaderboard` 选择平均回报或 UCB 更好的源版本。
+
+当前经典牌组内置的狼人、平民、预言家、女巫和猎人策略已提升为 `selfplay-v20-ee31f47c`：该版本由 20 局累计自博弈生成，并以内容指纹锁定实际评估过的完整提示词。小样本自博弈只用于发现可复现的决策错误，不代表对不同模型或牌组的最终胜率保证。
+
+除离线信号外，法官还会在 LLM 公开发言阶段检测与同日已有发言近乎逐字相同的回答。这类回答不会公开，而是计为一次控制器失败并要求模型改用独立核对出的具体事实重试，避免单个模板被全桌机械复制。
+
+在死亡不翻牌的对局里，法官也会拒绝狼人遗言中明确承认自身狼人身份的回答，并要求模型仅用公开事实维持身份伪装；这样不会让失败遗言替好人确认隐藏阵营。该校验只检查发言者自己的真实角色和公开遗言文本。
+
+轨迹记录每步的个人可见 `PlayerView`、合法动作、响应、skill 版本/内容指纹，以及终局奖励。基础回报为获胜 `+1`、失败 `-1`、平局 `0`；电影奖金份额作为奖励加成，控制器重试和安全后备给予小额惩罚。轨迹、候选 manifest 和生成配置权限均为 `0600`；轨迹含身份、私聊和个人思考，不会进入玩家视图，必须作为私密训练数据保存。详细格式和配置示例见 [配置与运行](docs/configuration.md#自博弈训练轨迹)。
+
 ## 开发与测试
 
 ```bash
